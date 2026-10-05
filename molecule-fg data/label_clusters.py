@@ -10,10 +10,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from accfg import AccFG
 
 ROOT = PROJECT_ROOT
-DEFAULT_INPUT = ROOT / 'molecule-fg data' / 'pattern_clusters_overlapping.csv'
-FALLBACK_INPUT = ROOT / 'molecule-fg data' / 'pattern_clusters.csv'
-CLUSTER_LABELED = ROOT / 'molecule-fg data' / 'pattern_clusters_labeled.csv'
-CLUSTER_SUMMARY = ROOT / 'molecule-fg data' / 'cluster_summary.csv'
+DATA_DIR = ROOT / 'molecule-fg data'
+OUTPUT_DIR = DATA_DIR / 'csv_outputs'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters_overlapping.csv'
+FALLBACK_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+CLUSTER_LABELED = OUTPUT_DIR / 'pattern_clusters_labeled.csv'
+CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
 
 
 def decode_pattern(pattern: str, fg_names: list[str]) -> list[str]:

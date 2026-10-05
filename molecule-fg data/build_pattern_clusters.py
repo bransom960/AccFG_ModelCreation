@@ -13,11 +13,15 @@ from patterns import pattern_count_dataframe
 from bernoulli_mixture_clustering import cluster_pattern_counts_overlapping, describe_clusters
 
 ROOT = PROJECT_ROOT
-SMILES_JSON = ROOT / 'molecule-fg data' / 'smiles.json'
-SAMPLE_DATASET = ROOT / 'molecule-fg data' / 'pubchem_like_sample_120.csv'
-PATTERN_OUTPUT = ROOT / 'molecule-fg data' / 'pubchem_like_pattern_counts.csv'
-CLUSTER_OUTPUT = ROOT / 'molecule-fg data' / 'pattern_clusters.csv'
-OVERLAP_OUTPUT = ROOT / 'molecule-fg data' / 'pattern_clusters_overlapping.csv'
+DATA_DIR = ROOT / 'molecule-fg data'
+OUTPUT_DIR = DATA_DIR / 'csv_outputs'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+SMILES_JSON = DATA_DIR / 'smiles.json'
+SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
+PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
+CLUSTER_OUTPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+OVERLAP_OUTPUT = OUTPUT_DIR / 'pattern_clusters_overlapping.csv'
 
 
 def load_smiles_list(dataset_path: Path):

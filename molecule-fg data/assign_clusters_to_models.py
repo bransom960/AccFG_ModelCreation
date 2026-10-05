@@ -4,10 +4,14 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-CLUSTER_SUMMARY = ROOT / 'molecule-fg data' / 'cluster_summary.csv'
-MODEL_SPECS = ROOT / 'molecule-fg data' / 'model_specs.csv'
-MODEL_ASSIGNMENTS = ROOT / 'molecule-fg data' / 'model_assignments.csv'
-MODEL_REPORT = ROOT / 'molecule-fg data' / 'model_coverage_report.csv'
+DATA_DIR = ROOT / 'molecule-fg data'
+OUTPUT_DIR = DATA_DIR / 'csv_outputs'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
+MODEL_SPECS = OUTPUT_DIR / 'model_specs.csv'
+MODEL_ASSIGNMENTS = OUTPUT_DIR / 'model_assignments.csv'
+MODEL_REPORT = OUTPUT_DIR / 'model_coverage_report.csv'
 
 REUSE_DECAY = 0.5
 OVERLAP_TOLERANCE = 0.5

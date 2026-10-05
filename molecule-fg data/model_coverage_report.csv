@@ -1,5 +1,0 @@
-model_name,clusters_used,clusters_reused,total_cluster_weight,effective_coverage,target_coverage,coverage_gap,fgs_used,n_fgs_used
-Large Statistical,3,2,1870,0.1588,0.3,0.1412,"amide,amine,benzene,benzimidazole,carbonyl,ether,hetero N basic H,hetero N basic no H,hetero N nonbasic,imidazole,lactam,oxoarene,oxy,piperidine,urea",15
-Large Transformer-Statistical,4,2,2813,0.4319,0.55,0.1181,"amine,benzene,carbonyl,ether,hetero N nonbasic,oxy,sulfanylidene,sulfonamide,sulfonic derivative,sulfonyl",10
-Small Statistical,1,0,304,0.0753,0.25,0.1747,"amide,amine,benzene,carbonyl,hetero N nonbasic",5
-Small Transformer-Finetuned,3,0,2771,0.6862,0.65,-0.0362,"amine,benzene,carbonyl,ether,hetero N nonbasic,oxy",6

@@ -13,9 +13,13 @@ from accfg.spreadsheet import fg_presence_vector
 from patterns import fg_pattern_string, pattern_count_dictionary
 
 ROOT = PROJECT_ROOT
-SMILES_JSON = ROOT / 'molecule-fg data' / 'smiles.json'
-SAMPLE_DATASET = ROOT / 'molecule-fg data' / 'pubchem_like_sample_120.csv'
-FG_OUTPUT = ROOT / 'molecule-fg data' / 'fg_presence.csv'
+DATA_DIR = ROOT / 'molecule-fg data'
+OUTPUT_DIR = DATA_DIR / 'csv_outputs'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+SMILES_JSON = DATA_DIR / 'smiles.json'
+SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
+FG_OUTPUT = OUTPUT_DIR / 'fg_presence.csv'
 
 
 def load_smiles_list(dataset_path: Path):
