@@ -1,3 +1,5 @@
+import pandas as pd
+
 from accfg import AccFG
 
 def test_lite():
@@ -73,3 +75,54 @@ def test_search_fg_smiles():
 
     assert 'benzene' == afg.search_fg_smiles('c1ccccc1')
     assert afg.search_fg_smiles('CC') is False
+
+
+def test_fg_presence_dataframe():
+    afg = AccFG(print_load_info=False, lite=True)
+    df = afg.fg_presence_dataframe(['CCO', 'CCN'])
+
+    assert 'Molecule' in df.columns
+    assert 'hydroxy' in df.columns
+    assert 'amine' in df.columns
+    assert df.loc[df['Molecule'] == 'CCO', 'hydroxy'].item() == 1
+    assert df.loc[df['Molecule'] == 'CCO', 'amine'].item() == 0
+    assert df.loc[df['Molecule'] == 'CCN', 'amine'].item() == 1
+    assert df.loc[df['Molecule'] == 'CCN', 'hydroxy'].item() == 0
+
+
+def test_fg_presence_dataframe_append(tmp_path):
+    afg = AccFG(print_load_info=False, lite=True)
+    csv_path = tmp_path / 'fg_presence.csv'
+
+    afg.fg_presence_dataframe(['CCO'], output_csv=str(csv_path), append_to_csv=False)
+    afg.fg_presence_dataframe(['CCO', 'CCN'], output_csv=str(csv_path), append_to_csv=True)
+
+    df = pd.read_csv(csv_path)
+    assert list(df['Molecule']) == ['CCO', 'CCN']
+    assert df.loc[df['Molecule'] == 'CCO', 'hydroxy'].item() == 1
+    assert df.loc[df['Molecule'] == 'CCN', 'amine'].item() == 1
+
+
+def test_fg_presence_dataframe_append_empty_file(tmp_path):
+    afg = AccFG(print_load_info=False, lite=True)
+    csv_path = tmp_path / 'fg_presence.csv'
+    csv_path.write_text('')
+
+    result = afg.update_fg_presence_csv(['CCO'], str(csv_path))
+
+    assert list(result['Molecule']) == ['CCO']
+    assert result.loc[result['Molecule'] == 'CCO', 'hydroxy'].item() == 1
+    assert pd.read_csv(csv_path).loc[0, 'Molecule'] == 'CCO'
+
+
+def test_fg_presence_graph_mentions_all_detected_groups():
+    afg = AccFG(print_load_info=False, lite=False)
+    smi = 'CCN(CC)CCC1=C2C3=CC=CC=C3CN2C4=C1C=C(C=C4)Br'
+    vec = afg.fg_presence_vector(smi, canonical=True)
+
+    assert vec['tertiary aliphatic amine'] == 1
+    assert vec['Aryl bromide'] == 1
+    assert vec['benzene'] == 1
+    assert vec['1H-indole'] == 1
+    assert vec['1H-pyrrole'] == 1
+    assert vec['hetero N basic no H'] == 1

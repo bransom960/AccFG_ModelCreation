@@ -4,6 +4,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import networkx as nx
 
+from .spreadsheet import fg_presence_dataframe as _fg_presence_dataframe
+from .spreadsheet import update_fg_presence_csv as _update_fg_presence_csv
+
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def canonical_smiles(smi):
@@ -227,6 +230,20 @@ class AccFG():
         except:
             return None
             # return "Wrong argument. Please input a valid molecular SMILES."
+
+    def fg_presence_vector(self, smiles: str, canonical: bool = True) -> dict:
+        """Compatibility wrapper for the spreadsheet helper."""
+        from .spreadsheet import fg_presence_vector
+        return fg_presence_vector(self, smiles, canonical=canonical)
+
+    def fg_presence_dataframe(self, smiles_list, canonical: bool = True, output_csv: str = None, append_to_csv: bool = False):
+        """Spreadsheet-style binary feature table, stored in a dedicated module."""
+        return _fg_presence_dataframe(self, smiles_list, canonical=canonical, output_csv=output_csv, append_to_csv=append_to_csv)
+
+    def update_fg_presence_csv(self, smiles_list, csv_path, canonical: bool = True):
+        """Append new molecules to a CSV without duplicating rows."""
+        return _update_fg_presence_csv(self, smiles_list, csv_path, canonical=canonical)
+
     def csv_to_dict(self, csv_file, lite=False):
         data = {}
         with open(csv_file, 'r') as file:
