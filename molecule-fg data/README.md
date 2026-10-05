@@ -60,7 +60,7 @@ Script:
 
 What it does:
 
-- load molecule list from (It is set to `smiles.json` if available)
+- load molecule list (It is set to `smiles.json` if available)
 - otherwise falls back to `pubchem_like_sample_120.csv`
 - runs AccFG against each SMILES string
 - converts each molecule into a binary vector of functional-group presence/absence
