@@ -1,6 +1,14 @@
+import importlib.util
+from pathlib import Path
+
 import pandas as pd
 
 from accfg import AccFG
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / 'molecule-fg data' / 'assign_clusters_to_models.py'
+SPEC = importlib.util.spec_from_file_location('assign_clusters_to_models', MODULE_PATH)
+ASSIGN_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(ASSIGN_MODULE)
 
 def test_lite():
     afg = AccFG(print_load_info=False, lite=True)
@@ -126,3 +134,24 @@ def test_fg_presence_graph_mentions_all_detected_groups():
     assert vec['1H-indole'] == 1
     assert vec['1H-pyrrole'] == 1
     assert vec['hetero N basic no H'] == 1
+
+
+def test_assign_models_uses_every_cluster():
+    cluster_summary = pd.DataFrame([
+        {'cluster_id': 1, 'cluster_weight': 30, 'centroid_fgs': 'amide,benzene', 'centroid_n_fgs': 2},
+        {'cluster_id': 2, 'cluster_weight': 30, 'centroid_fgs': 'alcohol', 'centroid_n_fgs': 1},
+        {'cluster_id': 3, 'cluster_weight': 40, 'centroid_fgs': 'ether,amine,ketone,aromatic,halide', 'centroid_n_fgs': 9},
+    ])
+    model_specs = pd.DataFrame([
+        {'model_name': 'Small', 'target_coverage': 0.4, 'min_fgs': 1, 'max_fgs': 2},
+        {'model_name': 'Large', 'target_coverage': 0.4, 'min_fgs': 3, 'max_fgs': 5},
+    ])
+
+    assignments = ASSIGN_MODULE.assign_models(cluster_summary, model_specs)
+
+    assert set(cluster_summary['cluster_id']) == set(assignments['cluster_id'])
+
+    total_weight = int(cluster_summary['cluster_weight'].sum())
+    for model_name, spec in model_specs.groupby('model_name'):
+        model_cov = assignments[assignments['model_name'] == model_name]['effective_weight'].sum()
+        assert model_cov <= spec['target_coverage'].iloc[0] * total_weight

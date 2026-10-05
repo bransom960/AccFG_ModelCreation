@@ -24,16 +24,25 @@ def assign_models(cluster_summary: pd.DataFrame,
     """
     Assign clusters to models based on target coverage and rules.
     Returns a long-form DataFrame: one row per (model, cluster).
+
+    A final mandatory pass ensures every cluster is used at least once.
+    If a cluster falls outside the min/max window for all models, it is
+    assigned to the closest model by FG-count distance.
     """
     total_weight = int(cluster_summary['cluster_weight'].sum())
     cluster_use_count = {cid: 0 for cid in cluster_summary['cluster_id']}
     assignments = []
+    assigned_cluster_ids = set()
+    model_coverage_used = {
+        spec['model_name']: 0.0 for _, spec in model_specs.iterrows()
+    }
 
     for _, spec in model_specs.iterrows():
         model = spec['model_name']
         target = float(spec['target_coverage'])
         min_fgs = int(spec.get('min_fgs', 1))
         max_fgs = int(spec.get('max_fgs', 999))
+        target_weight = target * total_weight
 
         candidates = cluster_summary[
             (cluster_summary['centroid_n_fgs'] >= min_fgs) &
@@ -51,8 +60,7 @@ def assign_models(cluster_summary: pd.DataFrame,
             ascending=[False, False],
         )
 
-        target_weight = target * total_weight
-        cumulative = 0.0
+        cumulative = model_coverage_used[model]
         reused_weight = 0.0
 
         for _, row in candidates.iterrows():
@@ -61,6 +69,10 @@ def assign_models(cluster_summary: pd.DataFrame,
 
             cid = int(row['cluster_id'])
             w = float(row['effective_weight'])
+            remaining_capacity = max(0.0, target_weight - cumulative)
+            if remaining_capacity <= 0:
+                break
+            w = min(w, remaining_capacity)
             was_reused = cluster_use_count[cid] > 0
 
             if was_reused and reused_weight + w > overlap_tolerance * target_weight:
@@ -74,13 +86,61 @@ def assign_models(cluster_summary: pd.DataFrame,
                 'centroid_fgs': row['centroid_fgs'],
                 'centroid_n_fgs': int(row['centroid_n_fgs']),
                 'was_reused': was_reused,
+                'forced_assignment': False,
                 'target_coverage': target,
             })
 
             cumulative += w
+            model_coverage_used[model] = cumulative
             if was_reused:
                 reused_weight += w
             cluster_use_count[cid] += 1
+            assigned_cluster_ids.add(cid)
+
+    for _, row in cluster_summary.iterrows():
+        cid = int(row['cluster_id'])
+        if cid in assigned_cluster_ids:
+            continue
+
+        model_candidates = []
+        for _, spec in model_specs.iterrows():
+            model_name = spec['model_name']
+            target = float(spec['target_coverage'])
+            target_weight = target * total_weight
+            remaining_capacity = max(0.0, target_weight - model_coverage_used[model_name])
+            distance = 0 if int(spec['min_fgs']) <= int(row['centroid_n_fgs']) <= int(spec['max_fgs']) else min(
+                abs(int(row['centroid_n_fgs']) - int(spec['min_fgs'])),
+                abs(int(row['centroid_n_fgs']) - int(spec['max_fgs'])),
+            )
+            model_candidates.append((distance, -remaining_capacity, model_name, remaining_capacity))
+
+        valid_candidates = [m for m in model_candidates if m[3] > 0]
+        if valid_candidates:
+            best = min(valid_candidates, key=lambda x: (x[0], x[1]))
+            model_name = best[2]
+            remaining_capacity = best[3]
+            target = float(model_specs.loc[model_specs['model_name'] == model_name, 'target_coverage'].iloc[0])
+            effective_weight = min(float(row['cluster_weight']), remaining_capacity)
+        else:
+            best = min(model_candidates, key=lambda x: (x[0], x[1]))
+            model_name = best[2]
+            effective_weight = 0.0
+            target = float(model_specs.loc[model_specs['model_name'] == model_name, 'target_coverage'].iloc[0])
+
+        assignments.append({
+            'model_name': model_name,
+            'cluster_id': cid,
+            'cluster_weight': int(row['cluster_weight']),
+            'effective_weight': round(effective_weight, 2),
+            'centroid_fgs': row['centroid_fgs'],
+            'centroid_n_fgs': int(row['centroid_n_fgs']),
+            'was_reused': False,
+            'forced_assignment': True,
+            'target_coverage': target,
+        })
+        model_coverage_used[model_name] += effective_weight
+        cluster_use_count[cid] += 1
+        assigned_cluster_ids.add(cid)
 
     return pd.DataFrame(assignments)
 

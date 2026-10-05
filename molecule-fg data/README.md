@@ -201,6 +201,21 @@ Model assignment logic:
 - a cluster reused by another model gets discounted via a reuse factor
 - each model tries to reach its desired coverage without overusing the same cluster
 
+Important assignment rule:
+
+- every discovered cluster must still be assigned at least once
+- this is enforced even when a cluster sits outside the min/max FG windows for all models
+- in that case, the cluster is assigned to the closest compatible model by FG-count distance
+- however, the fallback assignment is capped so it cannot push a model above its target coverage
+- if a model has no remaining target budget, the cluster is not allowed to exceed the remaining allocation for that model
+
+This means the pipeline enforces two constraints at the same time:
+
+1. every cluster gets used at least once
+2. no model exceeds its assigned domain coverage target
+
+This is the key difference between a simple “closest model” fallback and a valid domain assignment policy.
+
 ## The model rule file
 
 The model rules live in:
@@ -224,7 +239,6 @@ Important modeling note:
 - a cluster is only eligible for a model if its centroid FG count falls within that model’s min/max FG range
 
 So the global FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
-
 
 ## Typical run order
 
