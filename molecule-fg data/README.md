@@ -16,20 +16,6 @@ The pipeline is designed to work from raw SMILES input, process it with AccFG, a
 - `pubchem_like_sample_120.csv` — fallback sample dataset if `smiles.json` is missing
 - `build_sample_fg_dataset.py` — creates the FG presence table
 
-For large datasets, place the main SMILES source in this folder as:
-
-- `smiles.json` for JSON input, or
-- a CSV file with a `smiles` column for CSV input
-
-This folder is the expected input location for the pipeline. The loader checks for `smiles.json` first and falls back to `pubchem_like_sample_120.csv` only if the JSON file is absent.
-
-For 100K+ molecules, the recommended pattern is:
-
-- keep the raw SMILES file in this folder
-- name it `smiles.json` if it is a JSON list or object, or
-- name it something descriptive but keep a `smiles` column if it is CSV
-- then rerun the pipeline scripts from the project root
-
 This is the location that the scripts are written to read from by default.
 
 - `build_pattern_count_dictionary.py` — builds compressed pattern counts
@@ -230,13 +216,15 @@ The file contains model definitions such as:
 
 This is how the pipeline decides whether a certain cluster fits a model type.
 
-Example model entries:
+Important modeling note:
 
-- Lookup Small
-- Small Statistical
-- Small Transformer-Finetuned
-- Large Transformer-Statistical
-- Large Statistical
+- the 504 entries in `accfg/fgs_common.csv` are the global functional-group vocabulary for the whole dataset
+- they are not a separate rule set for each model
+- instead, each model defines a complexity window for the cluster centroids it is allowed to consider
+- a cluster is only eligible for a model if its centroid FG count falls within that model’s min/max FG range
+
+So the global FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
+
 
 ## Typical run order
 
@@ -280,8 +268,16 @@ This is the most important conceptual link:
 - Re-run the pipeline whenever the input SMILES list changes.
 - If you add new model rules, update `model_specs.csv` and then rerun `assign_clusters_to_models.py`.
 
-## Summary
+For large datasets, place the main SMILES source in this folder as:
 
-This folder is the complete chemistry-pattern analysis pipeline. It starts with raw molecules, identifies chemical functional groups, compresses repeated patterns, discovers meaningful clusters, labels those clusters, and finally assigns them to model coverage buckets.
+- `smiles.json` for JSON input, or
+- a CSV file with a `smiles` column for CSV input
 
-The whole thing is designed to be reproducible and easy to rerun whenever the dataset changes.
+This folder is the expected input location for the pipeline. The loader checks for `smiles.json` first and falls back to `pubchem_like_sample_120.csv` only if the JSON file is absent.
+
+For 100K+ molecules, the recommended pattern is:
+
+- keep the raw SMILES file in this folder
+- name it `smiles.json` if it is a JSON list or object, or
+- name it something descriptive but keep a `smiles` column if it is CSV
+- then rerun the pipeline scripts from the project root
