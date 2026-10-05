@@ -10,12 +10,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from accfg import AccFG
 
 ROOT = PROJECT_ROOT
-DATA_DIR = ROOT / 'molecule-fg data'
+DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters_overlapping.csv'
-FALLBACK_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
 CLUSTER_LABELED = OUTPUT_DIR / 'pattern_clusters_labeled.csv'
 CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
 
@@ -58,6 +57,19 @@ def parse_cluster_memberships(value):
     return [int(value)]
 
 
+def cluster_pattern_weight(group: pd.DataFrame) -> int:
+    """Count each unique pattern once for a cluster.
+
+    Overlap-aware cluster outputs can repeat the same pattern across multiple
+    cluster memberships, so we must deduplicate by pattern before summing counts.
+    """
+    if group.empty:
+        return 0
+    if 'pattern_index' in group.columns:
+        return int(group.drop_duplicates(subset=['pattern_index'])['count'].sum())
+    return int(group['count'].sum())
+
+
 def load_cluster_rows(cluster_input: Path) -> pd.DataFrame:
     df = pd.read_csv(cluster_input)
 
@@ -78,7 +90,7 @@ def load_cluster_rows(cluster_input: Path) -> pd.DataFrame:
 
 
 def main():
-    cluster_input = DEFAULT_INPUT if DEFAULT_INPUT.exists() else FALLBACK_INPUT
+    cluster_input = DEFAULT_INPUT
     afg = AccFG(print_load_info=False, lite=False)
     fg_names = list(afg.dict_fgs.keys())
 
@@ -113,8 +125,8 @@ def main():
 
         summary_rows.append({
             'cluster_id': cid,
-            'cluster_weight': int(group['count'].sum()),
-            'n_patterns': len(group),
+            'cluster_weight': cluster_pattern_weight(group),
+            'n_patterns': len(group.drop_duplicates(subset=['pattern_index'])) if 'pattern_index' in group.columns else len(group),
             'centroid_fgs': ','.join(centroid_fgs),
             'centroid_n_fgs': len(centroid_fgs),
             'union_fgs': ','.join(union_fgs),

@@ -123,10 +123,11 @@ This is the key distinction:
 - `--k 4` means “maximum components allowed”
 - the Bernoulli mixture determines the final cluster count automatically
 
-Outputs:
+Output:
 
 - `csv_outputs/pattern_clusters.csv`
-- `csv_outputs/pattern_clusters_overlapping.csv`
+
+This is the canonical clustering output: one row per unique pattern, with the overlapping cluster memberships kept in the same row rather than expanded into duplicate rows.
 
 Key concepts:
 
@@ -146,8 +147,8 @@ Script:
 
 What it does:
 
-- reads the overlapping cluster output
-- expands the overlapping cluster memberships into rows that can be summarized
+- reads the canonical cluster output
+- normalizes the overlap memberships into the summaries used downstream
 - converts binary strings back into actual FG names
 - calculates cluster-level summaries such as:
   - centroid FG list
@@ -233,23 +234,25 @@ This is how the pipeline decides whether a certain cluster fits a model type.
 
 Important modeling note:
 
-- the 504 entries in `accfg/fgs_common.csv` are the global functional-group vocabulary for the whole dataset
-- they are not a separate rule set for each model
+- the base common list in `accfg/fgs_common.csv` contains 504 entries
+- in the current full pipeline (`lite=False`), the runtime FG vocabulary is larger because heterocycle features are added on top of that common list
+- in this repo, the active full-mode vocabulary is therefore 534 functional-group features, not 504
+- those vocabulary entries are not a separate rule set for each model
 - instead, each model defines a complexity window for the cluster centroids it is allowed to consider
 - a cluster is only eligible for a model if its centroid FG count falls within that model’s min/max FG range
 
-So the global FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
+So the full FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
 
 ## Typical run order
 
 From the project root, the intended order is:
 
 ```bash
-python3 "molecule-fg data/build_sample_fg_dataset.py"
-python3 "molecule-fg data/build_pattern_count_dictionary.py"
-python3 "molecule-fg data/build_pattern_clusters.py" --k 4 --seed 0
-python3 "molecule-fg data/label_clusters.py"
-python3 "molecule-fg data/assign_clusters_to_models.py"
+python3 "molecule-fg-data/build_sample_fg_dataset.py"
+python3 "molecule-fg-data/build_pattern_count_dictionary.py"
+python3 "molecule-fg-data/build_pattern_clusters.py" --k 4 --seed 0
+python3 "molecule-fg-data/label_clusters.py"
+python3 "molecule-fg-data/assign_clusters_to_models.py"
 ```
 
 That produces the full pipeline result.
@@ -268,8 +271,7 @@ This is the most important conceptual link:
 
 - `fg_presence.csv` = molecule-level binary table
 - `pubchem_like_pattern_counts.csv` = compressed unique pattern table
-- `pattern_clusters.csv` = clustered patterns
-- `pattern_clusters_overlapping.csv` = overlap-aware cluster assignments
+- `pattern_clusters.csv` = canonical clustered pattern table
 - `pattern_clusters_labeled.csv` = decoded FG labels for each pattern row
 - `cluster_summary.csv` = chemical summary for each cluster
 - `model_assignments.csv` = which cluster covers which model

@@ -1,14 +1,32 @@
 import importlib.util
+import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from accfg import AccFG
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / 'molecule-fg data' / 'assign_clusters_to_models.py'
+MODULE_DIR = Path(__file__).resolve().parents[1] / 'molecule-fg-data'
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
+
+from patterns import fg_presence_rows
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / 'molecule-fg-data' / 'assign_clusters_to_models.py'
 SPEC = importlib.util.spec_from_file_location('assign_clusters_to_models', MODULE_PATH)
 ASSIGN_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ASSIGN_MODULE)
+
+LABEL_MODULE_PATH = Path(__file__).resolve().parents[1] / 'molecule-fg-data' / 'label_clusters.py'
+LABEL_SPEC = importlib.util.spec_from_file_location('label_clusters', LABEL_MODULE_PATH)
+LABEL_MODULE = importlib.util.module_from_spec(LABEL_SPEC)
+LABEL_SPEC.loader.exec_module(LABEL_MODULE)
+
+CLUSTER_MODULE_PATH = Path(__file__).resolve().parents[1] / 'molecule-fg-data' / 'bernoulli_mixture_clustering.py'
+CLUSTER_SPEC = importlib.util.spec_from_file_location('bernoulli_mixture_clustering', CLUSTER_MODULE_PATH)
+CLUSTER_MODULE = importlib.util.module_from_spec(CLUSTER_SPEC)
+CLUSTER_SPEC.loader.exec_module(CLUSTER_MODULE)
 
 def test_lite():
     afg = AccFG(print_load_info=False, lite=True)
@@ -155,3 +173,77 @@ def test_assign_models_uses_every_cluster():
     for model_name, spec in model_specs.groupby('model_name'):
         model_cov = assignments[assignments['model_name'] == model_name]['effective_weight'].sum()
         assert model_cov <= spec['target_coverage'].iloc[0] * total_weight
+
+
+def test_cluster_summary_uses_unique_pattern_counts_once_per_cluster():
+    group = pd.DataFrame([
+        {'pattern_index': 0, 'count': 10},
+        {'pattern_index': 0, 'count': 10},
+        {'pattern_index': 1, 'count': 5},
+    ])
+
+    assert LABEL_MODULE.cluster_pattern_weight(group) == 15
+
+
+def test_fg_presence_rows_keep_cid_for_pattern_join():
+    afg = AccFG(print_load_info=False, lite=True)
+    rows = fg_presence_rows(afg, ['CCO', 'CCN'], canonical=True, cid_values=[101, 202])
+
+    assert rows[0]['cid'] == 101
+    assert rows[1]['cid'] == 202
+    assert {'pattern_index', 'Molecule', 'cid'} <= set(rows[0].keys())
+
+
+def test_label_clusters_uses_canonical_cluster_file_only():
+    assert LABEL_MODULE.DEFAULT_INPUT.name == 'pattern_clusters.csv'
+
+
+def test_weighted_bernoulli_em_uses_pattern_counts():
+    X = np.array([
+        [1, 0, 1],
+        [1, 0, 0],
+        [0, 1, 0],
+    ], dtype=np.int8)
+    sample_weights = np.array([2.0, 1.0, 1.0], dtype=float)
+
+    weights, means, resp = CLUSTER_MODULE.bernoulli_mixture_em(
+        X,
+        n_components=2,
+        n_iter=50,
+        tol=1e-6,
+        seed=0,
+        sample_weights=sample_weights,
+        verbose=False,
+    )
+
+    assert 1 <= len(weights) <= 2
+    assert np.allclose(weights.sum(), 1.0)
+    assert np.all(np.isfinite(means))
+    assert resp.shape[0] == 3
+    assert np.all(resp >= 0)
+
+
+def test_assign_models_uses_unique_pattern_total_for_coverage():
+    cluster_summary = pd.DataFrame([
+        {'cluster_id': 0, 'cluster_weight': 70, 'centroid_fgs': 'amine,benzene', 'centroid_n_fgs': 2},
+        {'cluster_id': 1, 'cluster_weight': 40, 'centroid_fgs': 'amide,ketone', 'centroid_n_fgs': 2},
+    ])
+    model_specs = pd.DataFrame([
+        {'model_name': 'Small', 'target_coverage': 0.5, 'min_fgs': 1, 'max_fgs': 3},
+    ])
+
+    assignments = ASSIGN_MODULE.assign_models(
+        cluster_summary,
+        model_specs,
+        total_weight=100,
+    )
+    report = ASSIGN_MODULE.build_report(assignments, total_weight=100)
+
+    assert report['effective_coverage'].iloc[0] <= 0.5 + 1e-9
+    assert report['total_cluster_weight'].iloc[0] > 100
+
+
+def test_patterns_to_matrix_accepts_numeric_matrix_without_string_conversion():
+    X = np.array([[1, 0, 1], [0, 1, 0]], dtype=np.int8)
+
+    assert np.array_equal(CLUSTER_MODULE.patterns_to_matrix(X), X)

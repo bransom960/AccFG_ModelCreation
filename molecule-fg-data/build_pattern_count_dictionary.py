@@ -12,7 +12,7 @@ from accfg import AccFG
 from patterns import pattern_count_dataframe
 
 ROOT = PROJECT_ROOT
-DATA_DIR = ROOT / 'molecule-fg data'
+DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
 

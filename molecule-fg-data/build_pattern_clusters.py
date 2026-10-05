@@ -13,15 +13,15 @@ from patterns import pattern_count_dataframe
 from bernoulli_mixture_clustering import cluster_pattern_counts_overlapping, describe_clusters
 
 ROOT = PROJECT_ROOT
-DATA_DIR = ROOT / 'molecule-fg data'
+DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+FG_PRESENCE = OUTPUT_DIR / 'fg_presence.csv'
 SMILES_JSON = DATA_DIR / 'smiles.json'
 SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
 PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
 CLUSTER_OUTPUT = OUTPUT_DIR / 'pattern_clusters.csv'
-OVERLAP_OUTPUT = OUTPUT_DIR / 'pattern_clusters_overlapping.csv'
 
 
 def load_smiles_list(dataset_path: Path):
@@ -53,8 +53,19 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
         seed=seed,
         verbose=True,
     )
-    clustered.to_csv(CLUSTER_OUTPUT, index=False)
-    clustered.to_csv(OVERLAP_OUTPUT, index=False)
+
+    canonical_df = clustered.copy().sort_values(['cluster_id', 'pattern_index']).reset_index(drop=True)
+    if FG_PRESENCE.exists():
+        fg_presence = pd.read_csv(FG_PRESENCE)
+        if {'cid', 'pattern_index'}.issubset(fg_presence.columns):
+            pattern_cids = (
+                fg_presence.groupby('pattern_index', sort=False)['cid']
+                .agg(lambda s: ','.join(str(int(x)) for x in sorted(pd.unique(s))))
+                .rename('member_cids')
+            )
+            canonical_df['member_cids'] = canonical_df['pattern_index'].map(pattern_cids)
+
+    canonical_df.to_csv(CLUSTER_OUTPUT, index=False)
 
     fg_names = list(afg.dict_fgs.keys())
     primary_clusters = sorted(clustered['cluster_id'].unique())
@@ -67,9 +78,8 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
     describe_clusters(means, weights, fg_names, top_k=8)
 
     print(f'Wrote {len(pattern_df)} unique patterns to {PATTERN_OUTPUT}')
-    print(f'Wrote {len(clustered)} clustered pattern rows to {CLUSTER_OUTPUT}')
-    print(f'Wrote overlap-formatted rows to {OVERLAP_OUTPUT}')
-    print(clustered.head(10).to_string(index=False))
+    print(f'Wrote {len(canonical_df)} clustered pattern rows to {CLUSTER_OUTPUT}')
+    print(canonical_df.head(10).to_string(index=False))
 
 
 if __name__ == '__main__':

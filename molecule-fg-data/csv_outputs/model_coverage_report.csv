@@ -1,0 +1,4 @@
+model_name,clusters_used,clusters_reused,total_cluster_weight,effective_coverage,target_coverage,coverage_gap,fgs_used,n_fgs_used
+Large Statistical,1,1,1118,0.1381,0.3,0.1619,"amine,benzene,carbonyl,ether,hetero N nonbasic,oxy",6
+Large Transformer-Statistical,1,0,1118,0.2763,0.55,0.2737,"amine,benzene,carbonyl,ether,hetero N nonbasic,oxy",6
+Small Transformer-Finetuned,1,0,2929,0.65,0.65,0.0,"amine,benzene,carbonyl,ether,hetero N nonbasic,oxy",6

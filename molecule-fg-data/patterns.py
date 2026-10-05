@@ -31,17 +31,19 @@ def fg_pattern_bitmask(afg: AccFG, smiles: str, canonical: bool = True) -> int:
     return int(fg_pattern_string(afg, smiles, canonical=canonical), 2)
 
 
-def fg_presence_rows(afg: AccFG, smiles_list: Iterable[str], canonical: bool = True) -> List[dict]:
-    """Return one row per molecule with the FG 0/1 vector and pattern index."""
+def fg_presence_rows(afg: AccFG, smiles_list: Iterable[str], canonical: bool = True, cid_values: Iterable[int] | None = None) -> List[dict]:
+    """Return one row per molecule with the FG 0/1 vector, pattern index, and exact cid."""
     pattern_counts = pattern_count_dictionary(afg, smiles_list, canonical=canonical)
     pattern_index = {pattern: idx for idx, pattern in enumerate(pattern_counts.keys())}
 
     rows = []
-    for smiles in smiles_list:
+    cid_source = list(cid_values) if cid_values is not None else list(range(len(list(smiles_list))))
+    for idx, smiles in enumerate(smiles_list):
         canon_smi = canonical_smiles(smiles) if canonical else smiles
         vector = fg_presence_vector(afg, canon_smi, canonical=False)
         pattern = fg_pattern_string(afg, canon_smi, canonical=False)
-        row = {'Molecule': canon_smi}
+        cid = cid_source[idx] if idx < len(cid_source) else idx
+        row = {'cid': cid, 'Molecule': canon_smi}
         row.update(vector)
         row['pattern_index'] = pattern_index[pattern]
         rows.append(row)
