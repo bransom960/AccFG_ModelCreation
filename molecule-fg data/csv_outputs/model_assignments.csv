@@ -1,0 +1,6 @@
+model_name,cluster_id,cluster_weight,effective_weight,centroid_fgs,centroid_n_fgs,was_reused,target_coverage
+Small Statistical,0,2610,2610.0,"hydroxy,amine,carbonyl,benzene",4,False,0.25
+Small Transformer-Finetuned,1,1476,1476.0,"hydroxy,amine,carbonyl,benzene",4,False,0.65
+Small Transformer-Finetuned,0,2610,1305.0,"hydroxy,amine,carbonyl,benzene",4,True,0.65
+Large Transformer-Statistical,1,1476,738.0,"hydroxy,amine,carbonyl,benzene",4,True,0.55
+Large Statistical,2,70,70.0,"amine,carbonyl,amide,lactam,urea,oxoarene,hetero N basic H,hetero N basic no H,benzene,imidazole,piperidine,benzimidazole",12,False,0.3

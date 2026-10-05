@@ -1,0 +1,6 @@
+model_name,target_coverage,min_fgs,max_fgs
+Lookup Small,0.05,1,3
+Small Statistical,0.25,2,5
+Small Transformer-Finetuned,0.65,3,8
+Large Transformer-Statistical,0.55,4,10
+Large Statistical,0.30,5,12
