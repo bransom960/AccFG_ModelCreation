@@ -17,6 +17,59 @@ def _log_joint(X: np.ndarray, means: np.ndarray, weights: np.ndarray) -> np.ndar
     return X @ (log_mu - log_1mu).T + log_1mu.sum(axis=1) + np.log(weights + 1e-12)
 
 
+def _run_em(X, sample_weights, weights, means, n_iter, tol, verbose):
+    """EM from the given start until the relative log-likelihood change is below tol.
+
+    sample_weights must sum to 1. Returns (weights, means, resp, log_likelihood).
+    """
+    log_likelihood = log_likelihood_old = -np.inf
+    resp = None
+    for it in range(n_iter):
+        log_resp = _log_joint(X, means, weights)
+
+        log_resp_shift = log_resp - log_resp.max(axis=1, keepdims=True)
+        resp = np.exp(log_resp_shift)
+        resp /= resp.sum(axis=1, keepdims=True)
+
+        Nk = (resp * sample_weights[:, None]).sum(axis=0) + 1e-12
+        weights = Nk / Nk.sum()
+        means = (resp.T @ (sample_weights[:, None] * X)) / Nk[:, None]
+
+        marginal = np.log(np.sum(np.exp(log_resp_shift), axis=1)) + log_resp.max(axis=1)
+        log_likelihood = float(np.sum(sample_weights * marginal))
+
+        if verbose and (it % 10 == 0 or it == n_iter - 1):
+            print(f'  iter {it:3d}  log-likelihood = {log_likelihood:.2f}')
+
+        if np.isfinite(log_likelihood_old):
+            rel_change = abs(log_likelihood - log_likelihood_old) / max(1e-12, abs(log_likelihood_old))
+            if rel_change < tol:
+                break
+        log_likelihood_old = log_likelihood
+    return weights, means, resp, log_likelihood
+
+
+def _fit_and_prune(X, sample_weights, weights, means, n_iter, tol, threshold, verbose):
+    """Run EM, then repeatedly drop components with mixing weight <= threshold and re-fit the
+    rest from where they were, until none is dropped. Components come back sorted by weight,
+    largest first. Returns (weights, means, resp, log_likelihood)."""
+    weights, means, resp, log_likelihood = _run_em(X, sample_weights, weights, means,
+                                                   n_iter, tol, verbose)
+    while True:
+        keep = weights > threshold
+        if not np.any(keep):
+            keep[np.argmax(weights)] = True
+        if keep.all():
+            break
+        if verbose:
+            print(f'  dropping {int((~keep).sum())} component(s) with weight <= {threshold:g}; '
+                  f're-fitting {int(keep.sum())}')
+        weights, means, resp, log_likelihood = _run_em(
+            X, sample_weights, weights[keep] / weights[keep].sum(), means[keep], n_iter, tol, False)
+    order = np.argsort(-weights, kind='stable')
+    return weights[order], means[order], resp[:, order], log_likelihood
+
+
 def bernoulli_mixture_em(
     X: np.ndarray,
     n_components: int,
@@ -33,6 +86,10 @@ def bernoulli_mixture_em(
     If sample_weights are provided, each row is treated as a weighted observation rather
     than expanded into repeated rows. This preserves the exact mixture objective for
     unique pattern data while avoiding the expensive molecule-level expansion.
+
+    Components whose mixing weight ends at or below prune_threshold (default 1e-3, i.e. 0.1%
+    of the molecules) are dropped and the remaining ones re-fitted, so n_components is an
+    upper bound. The best of n_restarts random starts (seeds seed, seed+1, ...) is kept.
     """
     X = np.asarray(X, dtype=np.float64)
     n, d = X.shape
@@ -41,17 +98,8 @@ def bernoulli_mixture_em(
     if n == 0:
         return np.array([], dtype=float), np.zeros((0, d), dtype=float), np.zeros((0, K), dtype=float)
 
-    if sample_weights is None:
-        sample_weights = np.ones(n, dtype=float)
-    else:
-        sample_weights = np.asarray(sample_weights, dtype=float)
-        if sample_weights.shape[0] != n:
-            raise ValueError(f'sample_weights length {sample_weights.shape[0]} does not match X rows {n}')
-
-    total_weight = float(sample_weights.sum())
-    if total_weight <= 0:
-        raise ValueError('sample_weights must sum to a positive value')
-    sample_weights = sample_weights / total_weight
+    sample_weights = _normalised_weights(sample_weights, n)
+    threshold = max(prune_threshold, 1.0 / max(1, n))
 
     best_result = None
     best_ll = -np.inf
@@ -60,48 +108,10 @@ def bernoulli_mixture_em(
         rng = np.random.default_rng(seed + restart)
         weights = np.ones(K, dtype=float) / K
         means = rng.uniform(0.25, 0.75, size=(K, d))
-        log_likelihood_old = -np.inf
-
-        for it in range(n_iter):
-            log_resp = _log_joint(X, means, weights)
-
-            log_resp_shift = log_resp - log_resp.max(axis=1, keepdims=True)
-            resp = np.exp(log_resp_shift)
-            resp /= resp.sum(axis=1, keepdims=True)
-
-            Nk = (resp * sample_weights[:, None]).sum(axis=0) + 1e-12
-            weights = Nk / Nk.sum()
-            means = (resp.T @ (sample_weights[:, None] * X)) / Nk[:, None]
-
-            marginal = np.log(np.sum(np.exp(log_resp_shift), axis=1)) + log_resp.max(axis=1)
-            log_likelihood = float(np.sum(sample_weights * marginal))
-
-            if verbose and (it % 10 == 0 or it == n_iter - 1):
-                print(f'  iter {it:3d}  log-likelihood = {log_likelihood:.2f}')
-
-            if np.isfinite(log_likelihood_old):
-                rel_change = abs(log_likelihood - log_likelihood_old) / max(1e-12, abs(log_likelihood_old))
-                if rel_change < tol:
-                    break
-            log_likelihood_old = log_likelihood
-
-        keep = weights > max(prune_threshold, 1.0 / max(1, n))
-        if not np.any(keep):
-            keep[np.argmax(weights)] = True
-
-        candidate_weights = weights[keep]
-        if candidate_weights.size > 0:
-            candidate_weights = candidate_weights / candidate_weights.sum()
-        candidate_means = means[keep]
-        candidate_resp = resp[:, keep]
-        order = np.argsort(-candidate_weights)
-        candidate_weights = candidate_weights[order]
-        candidate_means = candidate_means[order]
-        candidate_resp = candidate_resp[:, order]
-
-        result = (candidate_weights, candidate_means, candidate_resp)
+        weights, means, resp, log_likelihood = _fit_and_prune(
+            X, sample_weights, weights, means, n_iter, tol, threshold, verbose)
         if log_likelihood > best_ll:
-            best_result = result
+            best_result = (weights, means, resp)
             best_ll = log_likelihood
 
     if best_result is None:
@@ -109,6 +119,32 @@ def bernoulli_mixture_em(
 
     weights, means, resp = best_result
     return weights, means, resp
+
+
+def refit_mixture(X, sample_weights, weights, means, n_iter: int = 200, tol: float = 1e-5,
+                  prune_threshold: float = 1e-3):
+    """Re-fit a mixture from given components (e.g. after dropping some), with the same
+    pruning as bernoulli_mixture_em. Returns (weights, means, resp)."""
+    X = np.asarray(X, dtype=np.float64)
+    sample_weights = _normalised_weights(sample_weights, len(X))
+    weights = np.asarray(weights, dtype=float)
+    weights, means, resp, _ = _fit_and_prune(
+        X, sample_weights, weights / weights.sum(), np.asarray(means, dtype=float), n_iter, tol,
+        max(prune_threshold, 1.0 / max(1, len(X))), False)
+    return weights, means, resp
+
+
+def _normalised_weights(sample_weights, n):
+    if sample_weights is None:
+        sample_weights = np.ones(n, dtype=float)
+    else:
+        sample_weights = np.asarray(sample_weights, dtype=float)
+        if sample_weights.shape[0] != n:
+            raise ValueError(f'sample_weights length {sample_weights.shape[0]} does not match X rows {n}')
+    total_weight = float(sample_weights.sum())
+    if total_weight <= 0:
+        raise ValueError('sample_weights must sum to a positive value')
+    return sample_weights / total_weight
 
 
 def patterns_to_matrix(patterns: list[str] | np.ndarray) -> np.ndarray:
@@ -156,8 +192,14 @@ def cluster_pattern_counts_overlapping(
     top_n: int | None = 2,
     seed: int = 0,
     verbose: bool = True,
+    prune_threshold: float = 1e-3,
 ):
-    """Cluster binary FG patterns with automatic K and overlapping membership."""
+    """Cluster binary FG patterns with automatic K and overlapping membership.
+
+    max_components is an upper bound: components whose mixing weight ends at or below
+    prune_threshold, or that no pattern belongs to (not its most probable cluster, and never
+    above tau), are dropped and the rest re-fitted. Each drop is printed.
+    """
     if 'pattern' not in pattern_df.columns:
         raise ValueError("pattern_df must contain a 'pattern' column")
     if 'count' not in pattern_df.columns:
@@ -188,20 +230,33 @@ def cluster_pattern_counts_overlapping(
         seed=seed,
         verbose=verbose,
         sample_weights=counts,
+        prune_threshold=prune_threshold,
     )
+
+    while True:
+        pattern_level_resp = _log_joint(X.astype(np.float64), means, weights)
+        pattern_level_resp -= pattern_level_resp.max(axis=1, keepdims=True)
+        pattern_level_resp = np.exp(pattern_level_resp)
+        pattern_level_resp /= pattern_level_resp.sum(axis=1, keepdims=True)
+
+        memberships = assign_overlapping(pattern_level_resp, tau=tau, top_n=top_n)
+        owned = np.zeros(len(weights), dtype=bool)
+        for membership in memberships:
+            owned[membership] = True
+        if owned.all():
+            break
+        # A component no pattern belongs to would get no rows downstream and silently vanish.
+        if verbose:
+            print(f'Dropping {int((~owned).sum())} component(s) that no pattern belongs to; '
+                  f're-fitting {int(owned.sum())}')
+        weights, means, _ = refit_mixture(X, counts, weights[owned], means[owned],
+                                          prune_threshold=prune_threshold)
 
     K = len(weights)
     if verbose:
         print(f'Discovered K = {K}')
         print(f'Weights: {np.round(weights, 3).tolist()}')
 
-    pattern_level_resp = _log_joint(X.astype(np.float64), means, weights)
-
-    pattern_level_resp -= pattern_level_resp.max(axis=1, keepdims=True)
-    pattern_level_resp = np.exp(pattern_level_resp)
-    pattern_level_resp /= pattern_level_resp.sum(axis=1, keepdims=True)
-
-    memberships = assign_overlapping(pattern_level_resp, tau=tau, top_n=top_n)
     primaries = [m[0] for m in memberships]
     centroids = {k: ''.join('1' if prob >= 0.5 else '0' for prob in means[k]) for k in range(K)}
 

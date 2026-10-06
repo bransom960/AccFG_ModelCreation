@@ -108,7 +108,7 @@ Important detail about the Bernoulli model:
 - the algorithm does not force a fixed cluster count
 - it fits a Bernoulli mixture to the binary FG data using EM
 - each cluster has a vector of FG probabilities, where values near 1 mean “this FG is very likely in the cluster”
-- weak components are pruned automatically using a small threshold
+- weak components are pruned automatically: a component whose mixing weight ends at or below `--prune-threshold` (default `0.001`, i.e. 0.1% of molecules), or that no pattern belongs to, is dropped and the remaining components are re-fitted; each drop is printed
 - the final cluster count is therefore discovered from the data, not hard-coded by the command
 
 Why `--k 4` still appears in the command:
