@@ -8,14 +8,17 @@ Rules:
     more than 100%, in which case some must be);
   * a model's coverage = unique molecules in the union of its clusters / all clustered
     molecules. A molecule that belongs to two clusters given to the same model counts once;
-  * min_fgs / max_fgs in model_specs.csv are ignored: any cluster may go to any model.
+  * min_fgs / max_fgs in model_specs.csv are ignored: any cluster may go to any model;
+  * every model keeps at least --min-exclusive (default 0.01 = 1%) of the clustered molecules
+    that no other model covers; a `min_exclusive` column in model_specs.csv sets it per model.
 
 Subject to these rules the sum over models of |coverage - target| is minimised exactly, as a
 small integer program (scipy.optimize.milp, i.e. HiGHS). Overlapping memberships are handled
 by grouping patterns into "atoms" that share one membership set; an atom is covered by a
 model if any of its clusters is.
 
-If any model ends further than --tolerance (default 0.02 = 2 percentage points) from its
+If no whole-cluster assignment can give every model its exclusive share, or any model ends
+further than --tolerance (default 0.02 = 2 percentage points) from its
 target, the clusters are too coarse for the targets: every output is still written, a message
 saying to re-run build_pattern_clusters.py with more clusters is printed and saved to
 csv_outputs/assignment_warnings.txt, and the script exits with status 3.
@@ -95,12 +98,18 @@ def coverage(assign: np.ndarray, atom_sets: list, atom_counts: np.ndarray) -> np
 
 
 def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
-                     targets: np.ndarray, time_limit: float = 600.0):
+                     targets: np.ndarray, time_limit: float = 600.0,
+                     min_exclusive: np.ndarray | None = None):
     """Return (assign (n_models, n_clusters) bool, proven_optimal, solver message).
+    assign is None when there is no feasible assignment.
 
     Variables: x[m,c] in {0,1} (cluster c given to model m); y[m,a] in [0,1] (atom a covered
     by model m), forced to OR(x[m,c] for c in atom a); d[m] >= |coverage[m] - target[m]|.
     Minimise sum(d) + TIE_BREAK * sum(x) subject to every cluster in >= 1 model.
+
+    With min_exclusive (a fraction per model), also z[m,a] in [0,1] with z[m,a] <= y[m,a] and
+    z[m,a] <= 1 - y[m',a] for every other model m', so z can only be 1 for atoms model m
+    covers alone, and sum_a share[a] * z[m,a] >= min_exclusive[m].
     """
     try:
         from scipy.optimize import Bounds, LinearConstraint, milp
@@ -112,6 +121,8 @@ def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
     M, K, A = len(targets), n_clusters, len(atom_sets)
     share = atom_counts / atom_counts.sum()
     nx, ny = M * K, M * A
+    exclusive = min_exclusive is not None and np.any(np.asarray(min_exclusive) > 0)
+    nz = M * A if exclusive else 0
 
     def xi(m, c):
         return m * K + c
@@ -121,6 +132,9 @@ def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
 
     def di(m):
         return nx + ny + m
+
+    def zi(m, a):
+        return nx + ny + M + m * A + a
 
     rows, cols, vals, lo, hi = [], [], [], [], []
 
@@ -144,15 +158,23 @@ def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
         cov = [(yi(m, a), share[a]) for a in range(A)]
         add([(di(m), 1.0)] + [(col, -v) for col, v in cov], -targets[m], np.inf)
         add([(di(m), 1.0)] + cov, targets[m], np.inf)
+    if exclusive:  # z[m,a] = 1 only where model m alone covers atom a
+        for m in range(M):
+            for a in range(A):
+                add([(zi(m, a), 1.0), (yi(m, a), -1.0)], -np.inf, 0.0)
+                for other in range(M):
+                    if other != m:
+                        add([(zi(m, a), 1.0), (yi(other, a), 1.0)], -np.inf, 1.0)
+            add([(zi(m, a), share[a]) for a in range(A)], float(min_exclusive[m]), np.inf)
 
-    n = nx + ny + M
+    n = nx + ny + M + nz
     objective = np.zeros(n)
     objective[:nx] = TIE_BREAK
-    objective[nx + ny:] = 1.0
+    objective[nx + ny:nx + ny + M] = 1.0
     integrality = np.zeros(n)
     integrality[:nx] = 1
     upper = np.ones(n)
-    upper[nx + ny:] = np.inf
+    upper[nx + ny:nx + ny + M] = np.inf
     constraints = LinearConstraint(coo_matrix((vals, (rows, cols)), shape=(len(lo), n)).tocsr(),
                                    np.array(lo), np.array(hi))
     res = milp(objective, constraints=constraints, integrality=integrality,
@@ -163,11 +185,34 @@ def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
     return res.x[:nx].reshape(M, K) > 0.5, res.status == 0, res.message
 
 
+def exclusive_coverage(assign: np.ndarray, atom_sets: list, atom_counts: np.ndarray) -> np.ndarray:
+    """Fraction of molecules each model covers and no other model does."""
+    total = atom_counts.sum()
+    out = np.zeros(assign.shape[0])
+    for a, cols in enumerate(atom_sets):
+        covering = np.flatnonzero(assign[:, list(cols)].any(axis=1))
+        if len(covering) == 1:
+            out[covering[0]] += atom_counts[a]
+    return out / total
+
+
+class NoAssignment(RuntimeError):
+    """The solver found no assignment; `infeasible` says whether none exists."""
+
+    def __init__(self, message: str, infeasible: bool):
+        super().__init__(message)
+        self.infeasible = infeasible
+
+
 def assign_models(cluster_summary: pd.DataFrame,
                   model_specs: pd.DataFrame,
                   pattern_clusters: pd.DataFrame | None = None,
-                  time_limit: float = 600.0) -> tuple[pd.DataFrame, pd.Series]:
+                  time_limit: float = 600.0,
+                  min_exclusive: np.ndarray | None = None) -> tuple[pd.DataFrame, pd.Series]:
     """Assign whole clusters to models. Returns (assignments, coverage by model_name).
+
+    min_exclusive, one fraction per model, is the share of clustered molecules each model must
+    cover alone. Raises NoAssignment if the solver finds no assignment.
 
     assignments has one row per (model, cluster). pattern_clusters (one row per pattern with
     `count`, `cluster_id` and `cluster_memberships`) is needed to count molecules that sit in
@@ -190,14 +235,18 @@ def assign_models(cluster_summary: pd.DataFrame,
 
     targets = model_specs['target_coverage'].astype(float).to_numpy()
     assign, optimal, message = solve_assignment(atom_sets, atom_counts, len(cluster_ids),
-                                                targets, time_limit)
+                                                targets, time_limit, min_exclusive)
     if assign is None:
-        raise RuntimeError(f'the solver found no assignment: {message}')
+        raise NoAssignment(f'the solver found no assignment: {message}',
+                           infeasible='infeasible' in str(message).lower())
     if not optimal:
         print(f'WARNING: the solver stopped before proving optimality ({message}); using the '
               f'best assignment it found.')
 
     achieved = coverage(assign, atom_sets, atom_counts)
+    alone = exclusive_coverage(assign, atom_sets, atom_counts)
+    print('Exclusive share per model (molecules no other model covers): '
+          + ', '.join(f'{name} {100 * x:.1f}%' for name, x in zip(model_specs['model_name'], alone)))
     n_models = assign.sum(axis=0)
     rows = []
     for m, spec in model_specs.reset_index(drop=True).iterrows():
@@ -371,6 +420,10 @@ def main(argv=None) -> int:
                              '(default 0.02 = 2 percentage points)')
     parser.add_argument('--time-limit', type=float, default=600.0,
                         help='solver time limit in seconds (default 600)')
+    parser.add_argument('--min-exclusive', type=float, default=0.01,
+                        help='share of clustered molecules each model must cover alone '
+                             '(default 0.01 = 1%%; 0 turns the rule off). A min_exclusive column '
+                             'in model_specs.csv sets it per model')
     args = parser.parse_args(argv)
 
     cluster_summary = pd.read_csv(CLUSTER_SUMMARY)
@@ -387,13 +440,43 @@ def main(argv=None) -> int:
         print('note: min_fgs / max_fgs in model_specs.csv are ignored; any cluster may go to '
               'any model.')
 
+    min_exclusive = np.full(len(model_specs), args.min_exclusive, dtype=float)
+    if 'min_exclusive' in model_specs.columns:
+        per_model = pd.to_numeric(model_specs['min_exclusive'], errors='coerce').to_numpy()
+        min_exclusive = np.where(np.isnan(per_model), min_exclusive, per_model)
+    if min_exclusive.sum() > 1:
+        print(f'ERROR: the exclusive shares sum to {100 * min_exclusive.sum():.1f}% of molecules, '
+              f'more than all of them.', file=sys.stderr)
+        return 2
+
     print(f'Clustered molecules: {total_weight}')
     print(f'Models to fit: {len(model_specs)}  (targets sum to '
           f'{100 * model_specs["target_coverage"].sum():.0f}% of molecules)')
     print()
 
-    assignments, achieved = assign_models(cluster_summary, model_specs, pattern_clusters,
-                                          time_limit=args.time_limit)
+    print('Exclusive share required per model: '
+          + ', '.join(f'{name} {100 * e:.1f}%' for name, e in zip(model_specs['model_name'], min_exclusive)))
+    try:
+        assignments, achieved = assign_models(cluster_summary, model_specs, pattern_clusters,
+                                              time_limit=args.time_limit,
+                                              min_exclusive=min_exclusive)
+    except NoAssignment as err:
+        if not err.infeasible:
+            print(f'ERROR: {err}', file=sys.stderr)
+            return 1
+        for stale in (MODEL_ASSIGNMENTS, MODEL_REPORT, PATTERN_MODEL_MAP, MODEL_MOLECULE_COUNTS):
+            if stale.exists():
+                stale.unlink()  # from an earlier run; would not match these clusters
+        message = (f'No whole-cluster assignment gives every model its exclusive share '
+                   f'({", ".join(f"{100 * e:.1f}%" for e in min_exclusive)}) with these '
+                   f'{len(cluster_summary)} clusters.\n\n'
+                   f'Re-run build_pattern_clusters.py with a larger --max-components, then '
+                   f'label_clusters.py and this script; or lower --min-exclusive.')
+        ASSIGNMENT_WARNINGS.write_text(message + '\n')
+        print(message, file=sys.stderr)
+        print(f'(saved to {ASSIGNMENT_WARNINGS}; exiting with status {EXIT_NEEDS_MORE_CLUSTERS})',
+              file=sys.stderr)
+        return EXIT_NEEDS_MORE_CLUSTERS
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
     lineage = build_lineage_map(assignments, pattern_clusters)
@@ -412,6 +495,9 @@ def main(argv=None) -> int:
     print(report.drop(columns=['fgs_used']).to_string(index=False))
 
     counts = model_molecule_counts(lineage, model_specs, total_weight)
+    if counts is not None:
+        counts['exclusive_share'] = (counts['n_exclusive_molecules'] / total_weight).round(4)
+        counts['min_exclusive'] = list(min_exclusive) + [float(min_exclusive.sum())]
     if counts is None:
         print(f'\nnote: {pattern_file.name} has no member_cids, so {MODEL_MOLECULE_COUNTS.name} '
               f'was not written.')
