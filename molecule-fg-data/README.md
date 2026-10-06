@@ -257,6 +257,18 @@ On an LSF cluster, `cluster.lsf` runs stages 2–5 as one job (edit the paths bl
 bsub < molecule-fg-data/cluster.lsf
 ```
 
+To run **everything as one job**, stage 1 included (sample 500,000 molecules from the
+`processed_Compound_*.jsonl` files → FG matrix → patterns → clusters → labels → models), use
+`pipeline.lsf` instead. Edit its paths block first:
+
+```bash
+bsub < molecule-fg-data/pipeline.lsf
+```
+
+It stops at the first stage that fails. Stage 5's exit status 3 means the clusters are too
+coarse for the targets. In that case, raise `MAX_COMPONENTS` and resubmit: stage 1 resumes
+from its finished outputs, so only stages 2–5 run again.
+
 ## If `smiles.json` is missing
 
 The scripts gracefully fall back to:
