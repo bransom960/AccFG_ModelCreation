@@ -197,6 +197,47 @@ def build_report(assignments: pd.DataFrame, total_weight: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def parse_memberships(value, fallback) -> list:
+    """'0,3' -> [0, 3]. Falls back to [fallback] when the memberships cell is empty."""
+    if pd.isna(value) or not str(value).strip():
+        return [int(fallback)]
+    return [int(part) for part in str(value).split(',') if part.strip()]
+
+
+def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame) -> pd.DataFrame:
+    """One row per (model, cluster, pattern) for EVERY pattern in each assigned cluster.
+
+    A pattern belongs to each cluster in its `cluster_memberships`, primary or secondary,
+    and label_clusters.py counts it in every one of them. Joining on `cluster_id` alone
+    (the primary cluster) would leave out the molecules a cluster holds as secondary members,
+    and drop clusters that have no primary members at all.
+
+    Columns: model_name, cluster_id, pattern_index, is_primary, member_cids.
+    """
+    pairs = assignments[['model_name', 'cluster_id']].drop_duplicates()
+    needed = {'pattern_index', 'cluster_id', 'member_cids'}
+    if pattern_clusters.empty or not needed.issubset(pattern_clusters.columns):
+        return pairs
+
+    memberships = (pattern_clusters['cluster_memberships']
+                   if 'cluster_memberships' in pattern_clusters.columns
+                   else pattern_clusters['cluster_id'])
+    long = pattern_clusters[['pattern_index', 'member_cids']].copy()
+    long['member_of'] = [parse_memberships(v, c)
+                         for v, c in zip(memberships, pattern_clusters['cluster_id'])]
+    primary = (pattern_clusters['cluster_primary']
+               if 'cluster_primary' in pattern_clusters.columns
+               else pattern_clusters['cluster_id']).astype(int)
+    long['primary'] = primary.to_numpy()
+    long = long.explode('member_of').rename(columns={'member_of': 'cluster_id'})
+    long['cluster_id'] = long['cluster_id'].astype(int)
+    long['is_primary'] = long['cluster_id'] == long['primary']
+
+    lineage = pairs.merge(long[['cluster_id', 'pattern_index', 'is_primary', 'member_cids']],
+                          on='cluster_id', how='inner')
+    return lineage.sort_values(['model_name', 'cluster_id', 'pattern_index']).reset_index(drop=True)
+
+
 def main():
     cluster_summary = pd.read_csv(CLUSTER_SUMMARY)
     model_specs = pd.read_csv(MODEL_SPECS)
@@ -210,17 +251,7 @@ def main():
     assignments = assign_models(cluster_summary, model_specs, total_weight=total_weight)
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
-    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv', dtype=TEXT_COLUMNS) if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
-    if not pattern_clusters.empty and {'pattern_index', 'cluster_id', 'member_cids'}.issubset(pattern_clusters.columns):
-        model_map = assignments[['model_name', 'cluster_id']].merge(
-            pattern_clusters[['pattern_index', 'cluster_id', 'member_cids']],
-            on='cluster_id',
-            how='left',
-        )
-        model_map = model_map.dropna(subset=['pattern_index']).copy()
-        model_map.to_csv(PATTERN_MODEL_MAP, index=False)
-    else:
-        assignments[['model_name', 'cluster_id']].copy().to_csv(PATTERN_MODEL_MAP, index=False)
+    build_lineage_map(assignments, pattern_clusters).to_csv(PATTERN_MODEL_MAP, index=False)
 
     report = build_report(assignments, total_weight)
     report.to_csv(MODEL_REPORT, index=False)
