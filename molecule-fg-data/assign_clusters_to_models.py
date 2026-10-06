@@ -14,9 +14,16 @@ Subject to these rules the sum over models of |coverage - target| is minimised e
 small integer program (scipy.optimize.milp, i.e. HiGHS). Overlapping memberships are handled
 by grouping patterns into "atoms" that share one membership set; an atom is covered by a
 model if any of its clusters is.
+
+If any model ends further than --tolerance (default 0.02 = 2 percentage points) from its
+target, the clusters are too coarse for the targets: every output is still written, a message
+saying to re-run build_pattern_clusters.py with more clusters is printed and saved to
+csv_outputs/assignment_warnings.txt, and the script exits with status 3.
 """
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +39,9 @@ MODEL_SPECS = OUTPUT_DIR / 'model_specs.csv'
 MODEL_ASSIGNMENTS = OUTPUT_DIR / 'model_assignments.csv'
 MODEL_REPORT = OUTPUT_DIR / 'model_coverage_report.csv'
 PATTERN_MODEL_MAP = OUTPUT_DIR / 'pattern_cluster_model_map.csv'
+ASSIGNMENT_WARNINGS = OUTPUT_DIR / 'assignment_warnings.txt'
+
+EXIT_NEEDS_MORE_CLUSTERS = 3
 
 # Bit-string and list columns must stay text; see label_clusters.TEXT_COLUMNS.
 TEXT_COLUMNS = {
@@ -207,11 +217,12 @@ def assign_models(cluster_summary: pd.DataFrame,
 
 
 def build_report(assignments: pd.DataFrame, achieved: pd.Series, model_specs: pd.DataFrame,
-                 total_weight: int) -> pd.DataFrame:
+                 total_weight: int, tolerance: float | None = None) -> pd.DataFrame:
     """One row per model in model_specs, including models that received no cluster.
 
     effective_coverage is the model's share of unique clustered molecules; coverage_gap is
-    target - effective_coverage.
+    target - effective_coverage. With a tolerance, within_tolerance says whether
+    |coverage_gap| <= tolerance.
     """
     rows = []
     for _, spec in model_specs.iterrows():
@@ -230,10 +241,39 @@ def build_report(assignments: pd.DataFrame, achieved: pd.Series, model_specs: pd
             'effective_coverage': round(cov, 4),
             'target_coverage': target,
             'coverage_gap': round(target - cov, 4),
+            **({'within_tolerance': bool(abs(target - cov) <= tolerance + 1e-12)}
+               if tolerance is not None else {}),
             'fgs_used': ','.join(fgs),
             'n_fgs_used': len(fgs),
         })
     return pd.DataFrame(rows)
+
+
+def too_coarse_message(report: pd.DataFrame, cluster_summary: pd.DataFrame,
+                       total_weight: int, tolerance: float) -> str:
+    """Explain which models miss their target and that the clustering needs more clusters."""
+    lines = [f'The clusters are too coarse to meet the coverage targets within '
+             f'+/-{100 * tolerance:.1f} percentage points using whole clusters:', '']
+    for _, row in report[~report['within_tolerance']].iterrows():
+        lines.append(f"  {row['model_name']}: target {100 * row['target_coverage']:.1f}%, "
+                     f"best achievable {100 * row['effective_coverage']:.1f}% "
+                     f"({-100 * row['coverage_gap']:+.1f} points)")
+    shares = cluster_summary.set_index('cluster_id')['cluster_weight'] / total_weight
+    lines += ['', 'Cluster sizes (% of clustered molecules): '
+              + ', '.join(f'{cid}: {100 * share:.1f}' for cid, share in shares.items())]
+    ceiling = float(report['target_coverage'].max()) + tolerance
+    for cid, share in shares.items():
+        if share > ceiling:
+            lines.append(f'  cluster {cid} holds {100 * share:.1f}% of molecules, more than any '
+                         f'model may cover ({100 * ceiling:.1f}%), so it overshoots wherever '
+                         f'it goes.')
+    lines += ['', f'Re-run build_pattern_clusters.py with a larger --max-components (this run '
+                  f'has {len(cluster_summary)} clusters), then label_clusters.py and this script.',
+              'Components whose mixing weight ends below the pruning threshold in '
+              'bernoulli_mixture_clustering.py are dropped, so a larger --max-components alone '
+              'may not add clusters; lower that threshold as well if the cluster count does not '
+              'grow.']
+    return '\n'.join(lines)
 
 
 def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame) -> pd.DataFrame:
@@ -270,7 +310,16 @@ def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame)
     return lineage.sort_values(['model_name', 'cluster_id', 'pattern_index']).reset_index(drop=True)
 
 
-def main():
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--tolerance', type=float, default=0.02,
+                        help='allowed |coverage - target| per model, as a fraction '
+                             '(default 0.02 = 2 percentage points)')
+    parser.add_argument('--time-limit', type=float, default=600.0,
+                        help='solver time limit in seconds (default 600)')
+    args = parser.parse_args(argv)
+
     cluster_summary = pd.read_csv(CLUSTER_SUMMARY)
     model_specs = pd.read_csv(MODEL_SPECS)
     pattern_file = OUTPUT_DIR / 'pattern_clusters.csv'
@@ -290,12 +339,14 @@ def main():
           f'{100 * model_specs["target_coverage"].sum():.0f}% of molecules)')
     print()
 
-    assignments, achieved = assign_models(cluster_summary, model_specs, pattern_clusters)
+    assignments, achieved = assign_models(cluster_summary, model_specs, pattern_clusters,
+                                          time_limit=args.time_limit)
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
     build_lineage_map(assignments, pattern_clusters).to_csv(PATTERN_MODEL_MAP, index=False)
 
-    report = build_report(assignments, achieved, model_specs, total_weight)
+    report = build_report(assignments, achieved, model_specs, total_weight,
+                          tolerance=args.tolerance)
     report.to_csv(MODEL_REPORT, index=False)
 
     shared = assignments.drop_duplicates('cluster_id')['was_reused'].sum()
@@ -306,6 +357,21 @@ def main():
     print()
     print(report.drop(columns=['fgs_used']).to_string(index=False))
 
+    if report['within_tolerance'].all():
+        if ASSIGNMENT_WARNINGS.exists():
+            ASSIGNMENT_WARNINGS.unlink()  # stale, from an earlier run
+        print(f'\nAll models are within +/-{100 * args.tolerance:.1f} points of their target.')
+        return 0
+
+    message = too_coarse_message(report, cluster_summary, total_weight, args.tolerance)
+    ASSIGNMENT_WARNINGS.write_text(message + '\n')
+    print('\n' + '=' * 78, file=sys.stderr)
+    print(message, file=sys.stderr)
+    print('=' * 78, file=sys.stderr)
+    print(f'(saved to {ASSIGNMENT_WARNINGS}; exiting with status {EXIT_NEEDS_MORE_CLUSTERS})',
+          file=sys.stderr)
+    return EXIT_NEEDS_MORE_CLUSTERS
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
