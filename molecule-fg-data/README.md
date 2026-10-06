@@ -72,14 +72,18 @@ Script:
 
 What it does:
 
-- takes the molecule FG vectors
+- reads the FG matrix stage 1 already computed — `csv_outputs/fg_presence.csv`, or with `--fg-dir` the Parquet output of `stage1/fg_matrix.py` — so AccFG is not run again
 - converts each molecule into a binary FG pattern string
 - groups molecules that share the exact same pattern
 - counts how many molecules are in each pattern
 
-Output:
+Outputs:
 
 - `csv_outputs/pubchem_like_pattern_counts.csv`
+- `csv_outputs/molecule_patterns.csv` — `cid, pattern_index`, one row per molecule
+- `csv_outputs/fg_columns.json` — FG names in pattern-bit order
+
+Stages 3 and 4 read these files instead of `smiles.json`, so every stage works from the same molecules and the same `pattern_index`.
 
 This step matters because many molecules often share the same FG pattern. Counting patterns reduces the dataset size and makes clustering more interpretable.
 

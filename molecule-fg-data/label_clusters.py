@@ -1,15 +1,9 @@
 from pathlib import Path
-import sys
+import json
 
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from accfg import AccFG
-
-ROOT = PROJECT_ROOT
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -18,6 +12,7 @@ DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
 CLUSTER_LABELED = OUTPUT_DIR / 'pattern_clusters_labeled.csv'
 CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
 CLUSTER_CENTROIDS = OUTPUT_DIR / 'cluster_centroids.csv'
+FG_COLUMNS = OUTPUT_DIR / 'fg_columns.json'  # written by build_pattern_count_dictionary.py
 
 # Bit-string and list columns must stay text. Left to type inference, pandas may read a
 # 534-digit pattern as a number, which drops its leading zeros or, depending on the pandas
@@ -130,8 +125,9 @@ def load_cluster_rows(cluster_input: Path) -> pd.DataFrame:
 
 def main():
     cluster_input = DEFAULT_INPUT
-    afg = AccFG(print_load_info=False, lite=False)
-    fg_names = list(afg.dict_fgs.keys())
+    if not FG_COLUMNS.exists():
+        raise SystemExit(f'{FG_COLUMNS} not found: run build_pattern_count_dictionary.py first')
+    fg_names = json.loads(FG_COLUMNS.read_text())
 
     df = load_cluster_rows(cluster_input)
     centroids = load_centroids(CLUSTER_CENTROIDS)
