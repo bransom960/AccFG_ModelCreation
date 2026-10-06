@@ -179,43 +179,31 @@ Script:
 
 What it does:
 
-- reads the cluster summary
-- reads the model rules from `model_specs.csv`
-- chooses clusters that match each model’s FG-count and target-coverage constraints
-- applies a reuse decay so the same cluster cannot be counted fully by every model
-- writes assignment rows indicating which cluster belongs to which model
+- reads the cluster summary, the per-pattern cluster memberships (`pattern_clusters.csv`) and the model targets (`model_specs.csv`)
+- assigns whole clusters to models so that every model's coverage is as close as possible to its target
+- writes one row per (model, cluster), a per-model coverage report, and the pattern → cluster → model lineage map
 
 Inputs:
 
 - `csv_outputs/cluster_summary.csv`
+- `csv_outputs/pattern_clusters.csv`
 - `csv_outputs/model_specs.csv`
 
 Outputs:
 
 - `csv_outputs/model_assignments.csv`
 - `csv_outputs/model_coverage_report.csv`
+- `csv_outputs/pattern_cluster_model_map.csv`
 
-Model assignment logic:
+Assignment rules:
 
-- target coverage is expressed as a share of total cluster mass
-- clusters are ranked by effective contribution
-- a cluster reused by another model gets discounted via a reuse factor
-- each model tries to reach its desired coverage without overusing the same cluster
+1. every cluster is assigned to at least one model
+2. clusters are assigned whole; a model never takes part of a cluster
+3. a cluster may be assigned to several models (the targets may sum to more than 100%, in which case some clusters must be)
+4. a model's coverage is the share of **unique clustered molecules** in its clusters; a molecule in two clusters of the same model counts once
+5. subject to 1–4, the total distance from the targets, sum over models of |coverage − target|, is minimised
 
-Important assignment rule:
-
-- every discovered cluster must still be assigned at least once
-- this is enforced even when a cluster sits outside the min/max FG windows for all models
-- in that case, the cluster is assigned to the closest compatible model by FG-count distance
-- however, the fallback assignment is capped so it cannot push a model above its target coverage
-- if a model has no remaining target budget, the cluster is not allowed to exceed the remaining allocation for that model
-
-This means the pipeline enforces two constraints at the same time:
-
-1. every cluster gets used at least once
-2. no model exceeds its assigned domain coverage target
-
-This is the key difference between a simple “closest model” fallback and a valid domain assignment policy.
+The minimisation is exact: a small integer program solved with `scipy.optimize.milp` (scipy ≥ 1.9). Because clusters are whole, a model can end above or below its target; `coverage_gap` in the report (target − coverage) shows by how much, and models that received no cluster are listed with coverage 0.
 
 ## The model rule file
 
@@ -223,14 +211,11 @@ The model rules live in:
 
 - `csv_outputs/model_specs.csv`
 
-The file contains model definitions such as:
+The file contains one row per model:
 
-- model name
-- target coverage
-- min allowed FG count
-- max allowed FG count
-
-This is how the pipeline decides whether a certain cluster fits a model type.
+- `model_name`
+- `target_coverage` — the fraction of clustered molecules the model should cover
+- `min_fgs` / `max_fgs` — optional, and ignored by the assignment
 
 Important modeling note:
 
@@ -238,10 +223,7 @@ Important modeling note:
 - in the current full pipeline (`lite=False`), the runtime FG vocabulary is larger because heterocycle features are added on top of that common list
 - in this repo, the active full-mode vocabulary is therefore 534 functional-group features, not 504
 - those vocabulary entries are not a separate rule set for each model
-- instead, each model defines a complexity window for the cluster centroids it is allowed to consider
-- a cluster is only eligible for a model if its centroid FG count falls within that model’s min/max FG range
-
-So the full FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
+- `model_specs.csv` needs `model_name` and `target_coverage` (a fraction of clustered molecules); `min_fgs` / `max_fgs` may be present but are ignored, so any cluster may go to any model
 
 ## Typical run order
 
