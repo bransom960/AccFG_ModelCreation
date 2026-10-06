@@ -20,6 +20,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SMILES_JSON = DATA_DIR / 'smiles.json'
 SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
 FG_OUTPUT = OUTPUT_DIR / 'fg_presence.csv'
+REJECTED_OUTPUT = OUTPUT_DIR / 'rejected_molecules.csv'
 
 
 def _json_items(payload, dataset_path: Path) -> list:
@@ -34,8 +35,13 @@ def _json_items(payload, dataset_path: Path) -> list:
     raise ValueError(f'Unsupported JSON structure in {dataset_path}')
 
 
-def load_smiles_records(dataset_path: Path) -> tuple[list, bool]:
-    """Return ([(cid, smiles), ...], ids_are_positions).
+def is_salt_or_mixture(smiles: str) -> bool:
+    """A '.' in SMILES only ever separates disconnected components: a salt or a mixture."""
+    return '.' in smiles
+
+
+def _read_records(dataset_path: Path) -> tuple[list, bool]:
+    """Return ([(cid, smiles), ...], ids_are_positions) for every molecule in the file.
 
     Source IDs are kept when the input carries them: smiles.json entries that are objects
     with 'cid' and 'smiles' keys, or a CSV with a 'cid' column. For a plain list of SMILES
@@ -64,6 +70,20 @@ def load_smiles_records(dataset_path: Path) -> tuple[list, bool]:
             if str(row['smiles']).strip()], True
 
 
+def load_smiles_records(dataset_path: Path) -> tuple[list, bool]:
+    """Like _read_records, without salts and mixtures. Later stages read stage 1's output,
+    so a molecule dropped here is dropped everywhere."""
+    records, ids_are_positions = _read_records(dataset_path)
+    return [r for r in records if not is_salt_or_mixture(r[1])], ids_are_positions
+
+
+def load_rejected_records(dataset_path: Path) -> list:
+    """[(cid, smiles, reason), ...] for the molecules load_smiles_records drops."""
+    records, _ = _read_records(dataset_path)
+    return [(cid, smiles, 'salt_or_mixture') for cid, smiles in records
+            if is_salt_or_mixture(smiles)]
+
+
 def load_smiles_list(dataset_path: Path):
     """The SMILES in load_smiles_records order."""
     return [smiles for _, smiles in load_smiles_records(dataset_path)[0]]
@@ -78,6 +98,10 @@ def main():
               f"molecule's position in the file, not a source (e.g. PubChem) CID. Give each "
               f'entry as {{"cid": ..., "smiles": ...}} to keep the source IDs.')
     smiles_list = [smiles for _, smiles in smiles_records]
+    rejected = pd.DataFrame(load_rejected_records(source_path), columns=['cid', 'Molecule', 'reason'])
+    rejected.to_csv(REJECTED_OUTPUT, index=False)
+    print(f'Dropped {len(rejected)} salts and mixtures (SMILES containing "."); listed in '
+          f'{REJECTED_OUTPUT}')
 
     patterns = pattern_count_dictionary(afg, smiles_list, canonical=True)
     pattern_map = {pattern: idx for idx, pattern in enumerate(patterns.keys())}
