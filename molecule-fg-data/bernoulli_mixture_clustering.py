@@ -4,6 +4,19 @@ import numpy as np
 import pandas as pd
 
 
+def _log_joint(X: np.ndarray, means: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """log p(x, k) for every row x of X and every component k, shape (n_rows, K).
+
+    sum_j x_j log(mu_kj) + (1 - x_j) log(1 - mu_kj) equals
+    X @ (log(mu) - log(1 - mu)).T + sum_j log(1 - mu_kj), so the whole E-step is one matrix
+    product instead of K passes that each build an (n_rows, n_features) temporary. The
+    smoothing (+1e-12 inside each log) is unchanged.
+    """
+    log_mu = np.log(means + 1e-12)
+    log_1mu = np.log(1 - means + 1e-12)
+    return X @ (log_mu - log_1mu).T + log_1mu.sum(axis=1) + np.log(weights + 1e-12)
+
+
 def bernoulli_mixture_em(
     X: np.ndarray,
     n_components: int,
@@ -50,13 +63,7 @@ def bernoulli_mixture_em(
         log_likelihood_old = -np.inf
 
         for it in range(n_iter):
-            log_resp = np.zeros((n, K), dtype=float)
-            for k in range(K):
-                log_p = (
-                    X * np.log(means[k] + 1e-12)
-                    + (1 - X) * np.log(1 - means[k] + 1e-12)
-                ).sum(axis=1)
-                log_resp[:, k] = np.log(weights[k] + 1e-12) + log_p
+            log_resp = _log_joint(X, means, weights)
 
             log_resp_shift = log_resp - log_resp.max(axis=1, keepdims=True)
             resp = np.exp(log_resp_shift)
@@ -188,14 +195,7 @@ def cluster_pattern_counts_overlapping(
         print(f'Discovered K = {K}')
         print(f'Weights: {np.round(weights, 3).tolist()}')
 
-    X_patterns = patterns_to_matrix(patterns)
-    pattern_level_resp = np.zeros((len(patterns), K), dtype=float)
-    for k in range(K):
-        log_p = (
-            X_patterns * np.log(means[k] + 1e-12)
-            + (1 - X_patterns) * np.log(1 - means[k] + 1e-12)
-        ).sum(axis=1)
-        pattern_level_resp[:, k] = np.log(weights[k] + 1e-12) + log_p
+    pattern_level_resp = _log_joint(X.astype(np.float64), means, weights)
 
     pattern_level_resp -= pattern_level_resp.max(axis=1, keepdims=True)
     pattern_level_resp = np.exp(pattern_level_resp)
