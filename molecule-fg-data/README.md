@@ -51,6 +51,7 @@ What it does:
 - runs AccFG against each SMILES string
 - converts each molecule into a binary vector of functional-group presence/absence
 - writes a molecule-by-FG table
+- drops salts and mixtures (any SMILES containing `.`) and lists them, with their cid, in `csv_outputs/rejected_molecules.csv`; stages 2 and 3 drop the same molecules
 
 Output:
 
