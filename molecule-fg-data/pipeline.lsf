@@ -15,10 +15,15 @@
 # molecule-fg-data/csv_outputs/ (outputs of an earlier run are first moved to
 # csv_outputs/previous_<date>/; model_specs.csv stays).
 #
-# Exit status: that of the first stage that fails. Stage 5 exits with 3 when the clusters
-# are too coarse to meet the model coverage targets; csv_outputs/assignment_warnings.txt
-# says what to change. Raise MAX_COMPONENTS (and, if it says so, lower PRUNE_THRESHOLD) and
-# resubmit: stage 1 resumes from its finished outputs, so only stages 2-5 run again.
+# Cluster count: stages 3-5 are tried with each value in MAX_COMPONENTS_TRY in turn, and
+# the first one whose model assignment meets every rule is kept (stage 5 exits 0). Stage 5
+# exits with 3 when the clusters are too coarse -- a model would miss its coverage target by
+# more than TOLERANCE, or not every model can get MIN_EXCLUSIVE molecules of its own -- and
+# the next, larger value is tried. If none works, the job exits with 3 and
+# csv_outputs/assignment_warnings.txt says why; add larger values (or lower PRUNE_THRESHOLD
+# or MIN_EXCLUSIVE) and resubmit: stage 1 resumes from its finished outputs.
+#
+# Exit status: 0, 3 as above, or that of the first stage that fails.
 #
 # Sizing (estimates; check your first run's log): stage 1b dominates, at ~100 mol/s per
 # slot on Python 3.9 / AccFG 0.0.7 or ~200 on Python 3.10+ / AccFG 0.1.0, so 500k molecules
@@ -43,9 +48,10 @@ JSONL_DIR=/path/to/jsonl                 # the processed_Compound_*.jsonl files
 GLOB='processed_Compound_*.jsonl'
 TARGET=500000                            # molecules to sample (salts excluded)
 WORK=/path/to/scratch/fg_run             # stage-1 outputs; scratch is better than $HOME
-MAX_COMPONENTS=12                        # upper bound on the number of clusters
+MAX_COMPONENTS_TRY="12 16 24 32 48"      # cluster counts to try, smallest first
 PRUNE_THRESHOLD=0.001                    # drop clusters with mixing weight <= this
 TOLERANCE=0.02                           # allowed |coverage - target| per model
+MIN_EXCLUSIVE=0.01                       # share of molecules each model must have alone
 SEED=0
 # module load python/3.11                # or: source ~/miniforge3/bin/activate accfg
 # --------------------------------------------------------------------------------------
@@ -93,22 +99,32 @@ fi
 stage "2: patterns"
 python "$PIPELINE/build_pattern_count_dictionary.py" --fg-dir "$FG_DIR"
 
-stage "3: clusters"
-python "$PIPELINE/build_pattern_clusters.py" --max-components "$MAX_COMPONENTS" \
-       --prune-threshold "$PRUNE_THRESHOLD" --seed "$SEED"
+rc=3
+for K in $MAX_COMPONENTS_TRY; do
+    stage "3: clusters (at most $K)"
+    python "$PIPELINE/build_pattern_clusters.py" --max-components "$K" \
+           --prune-threshold "$PRUNE_THRESHOLD" --seed "$SEED"
 
-stage "4: labels"
-python "$PIPELINE/label_clusters.py"
+    stage "4: labels"
+    python "$PIPELINE/label_clusters.py"
 
-stage "5: model assignment"
-set +e
-python "$PIPELINE/assign_clusters_to_models.py" --tolerance "$TOLERANCE"
-rc=$?
-set -e
+    stage "5: model assignment (at most $K clusters)"
+    set +e
+    python "$PIPELINE/assign_clusters_to_models.py" --tolerance "$TOLERANCE" \
+           --min-exclusive "$MIN_EXCLUSIVE"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+        echo "kept the clustering with at most $K clusters"
+        break
+    fi
+    [ "$rc" -eq 3 ] || { echo "stage 5 failed (exit status $rc)"; exit "$rc"; }
+    echo "at most $K clusters is too coarse (see $OUT/assignment_warnings.txt); trying more"
+done
 if [ "$rc" -eq 3 ]; then
     echo
-    echo "Clusters too coarse for the coverage targets: see $OUT/assignment_warnings.txt."
-    echo "All outputs were written. Raise MAX_COMPONENTS above and resubmit; stage 1 resumes."
+    echo "No value in MAX_COMPONENTS_TRY met the rules: see $OUT/assignment_warnings.txt."
+    echo "csv_outputs holds the last try. Add larger values and resubmit; stage 1 resumes."
 fi
 
 echo "finished $(date)  (exit status $rc)"

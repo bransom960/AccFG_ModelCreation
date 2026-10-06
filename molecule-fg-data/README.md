@@ -202,9 +202,12 @@ Assignment rules:
 2. clusters are assigned whole; a model never takes part of a cluster
 3. a cluster may be assigned to several models (the targets may sum to more than 100%, in which case some clusters must be)
 4. a model's coverage is the share of **unique clustered molecules** in its clusters; a molecule in two clusters of the same model counts once
-5. subject to 1–4, the total distance from the targets, sum over models of |coverage − target|, is minimised
+5. every model keeps at least `--min-exclusive` (default `0.01`, i.e. 1%) of the clustered molecules that no other model covers; a `min_exclusive` column in `model_specs.csv` sets it per model, and `0` turns the rule off
+6. subject to 1–5, the total distance from the targets, sum over models of |coverage − target|, is minimised
 
 The minimisation is exact: a small integer program solved with `scipy.optimize.milp` (scipy ≥ 1.9). Because clusters are whole, a model can end above or below its target; `coverage_gap` in the report (target − coverage) shows by how much, and models that received no cluster are listed with coverage 0.
+
+If no assignment can give every model its exclusive share, stage 5 writes `assignment_warnings.txt` and exits with status **3** as well. Exclusive molecules need clusters that only one model takes, so more clusters (a larger `--max-components`) make the rule easier to meet.
 
 If any model ends more than `--tolerance` (default `0.02`, i.e. ±2 percentage points) from its target, the clusters are too coarse for the targets. All outputs are still written, but the script then prints a message naming each model that misses and the cluster sizes, saying to re-run `build_pattern_clusters.py` with a larger `--max-components`, saves it to `csv_outputs/assignment_warnings.txt`, and exits with status **3**. `within_tolerance` in the report shows which models pass.
 
@@ -256,9 +259,11 @@ To run **everything as one job**, stage 1 included (sample 500,000 molecules fro
 bsub < molecule-fg-data/pipeline.lsf
 ```
 
-It stops at the first stage that fails. Stage 5's exit status 3 means the clusters are too
-coarse for the targets. In that case, raise `MAX_COMPONENTS` and resubmit: stage 1 resumes
-from its finished outputs, so only stages 2–5 run again.
+It stops at the first stage that fails. Stages 3–5 are tried with each cluster count in
+`MAX_COMPONENTS_TRY` (default `12 16 24 32 48`), smallest first, and the first clustering whose
+model assignment meets every rule (coverage within `TOLERANCE`, `MIN_EXCLUSIVE` molecules of
+its own for every model) is kept. If none does, the job exits with status 3; add larger values
+and resubmit. Stage 1 resumes from its finished outputs, so only stages 2–5 run again.
 
 ## If `smiles.json` is missing
 
