@@ -16,6 +16,15 @@ MODEL_ASSIGNMENTS = OUTPUT_DIR / 'model_assignments.csv'
 MODEL_REPORT = OUTPUT_DIR / 'model_coverage_report.csv'
 PATTERN_MODEL_MAP = OUTPUT_DIR / 'pattern_cluster_model_map.csv'
 
+# Bit-string and list columns must stay text; see label_clusters.TEXT_COLUMNS.
+TEXT_COLUMNS = {
+    'pattern': str,
+    'cluster_representative': str,
+    'cluster_memberships': str,
+    'cluster_probabilities': str,
+    'member_cids': str,
+}
+
 REUSE_DECAY = 0.5
 OVERLAP_TOLERANCE = 0.5
 
@@ -191,7 +200,7 @@ def build_report(assignments: pd.DataFrame, total_weight: int) -> pd.DataFrame:
 def main():
     cluster_summary = pd.read_csv(CLUSTER_SUMMARY)
     model_specs = pd.read_csv(MODEL_SPECS)
-    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv') if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
+    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv', dtype=TEXT_COLUMNS) if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
     total_weight = int(pattern_clusters['count'].sum()) if not pattern_clusters.empty and 'count' in pattern_clusters.columns else int(cluster_summary['cluster_weight'].sum())
 
     print(f'Total molecule weight across all clusters: {total_weight}')
@@ -201,7 +210,7 @@ def main():
     assignments = assign_models(cluster_summary, model_specs, total_weight=total_weight)
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
-    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv') if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
+    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv', dtype=TEXT_COLUMNS) if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
     if not pattern_clusters.empty and {'pattern_index', 'cluster_id', 'member_cids'}.issubset(pattern_clusters.columns):
         model_map = assignments[['model_name', 'cluster_id']].merge(
             pattern_clusters[['pattern_index', 'cluster_id', 'member_cids']],

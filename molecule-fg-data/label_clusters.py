@@ -18,6 +18,17 @@ DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
 CLUSTER_LABELED = OUTPUT_DIR / 'pattern_clusters_labeled.csv'
 CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
 
+# Bit-string and list columns must stay text. Left to type inference, pandas may read a
+# 534-digit pattern as a number, which drops its leading zeros or, depending on the pandas
+# version, raises OverflowError.
+TEXT_COLUMNS = {
+    'pattern': str,
+    'cluster_representative': str,
+    'cluster_memberships': str,
+    'cluster_probabilities': str,
+    'member_cids': str,
+}
+
 
 def decode_pattern(pattern: str, fg_names: list[str]) -> list[str]:
     """Return FG names where the bit is 1."""
@@ -71,7 +82,7 @@ def cluster_pattern_weight(group: pd.DataFrame) -> int:
 
 
 def load_cluster_rows(cluster_input: Path) -> pd.DataFrame:
-    df = pd.read_csv(cluster_input)
+    df = pd.read_csv(cluster_input, dtype=TEXT_COLUMNS)
 
     if 'cluster_memberships' in df.columns:
         expanded_rows = []
