@@ -165,14 +165,16 @@ def test_assign_models_uses_every_cluster():
         {'model_name': 'Large', 'target_coverage': 0.4, 'min_fgs': 3, 'max_fgs': 5},
     ])
 
-    assignments = ASSIGN_MODULE.assign_models(cluster_summary, model_specs)
+    assignments, achieved = ASSIGN_MODULE.assign_models(cluster_summary, model_specs)
 
     assert set(cluster_summary['cluster_id']) == set(assignments['cluster_id'])
 
-    total_weight = int(cluster_summary['cluster_weight'].sum())
-    for model_name, spec in model_specs.groupby('model_name'):
-        model_cov = assignments[assignments['model_name'] == model_name]['effective_weight'].sum()
-        assert model_cov <= spec['target_coverage'].iloc[0] * total_weight
+    # Whole clusters only: a model's coverage is the sum of its clusters' full weights.
+    weights = cluster_summary.set_index('cluster_id')['cluster_weight']
+    total_weight = int(weights.sum())
+    for model_name in model_specs['model_name']:
+        ids = assignments.loc[assignments['model_name'] == model_name, 'cluster_id']
+        assert abs(achieved[model_name] - weights.loc[ids].sum() / total_weight) < 1e-9
 
 
 def test_cluster_summary_uses_unique_pattern_counts_once_per_cluster():
@@ -223,24 +225,27 @@ def test_weighted_bernoulli_em_uses_pattern_counts():
     assert np.all(resp >= 0)
 
 
-def test_assign_models_uses_unique_pattern_total_for_coverage():
+def test_assign_models_counts_shared_molecules_once():
+    # 100 unique molecules; 10 of them sit in both clusters, so the weights sum to 110.
     cluster_summary = pd.DataFrame([
         {'cluster_id': 0, 'cluster_weight': 70, 'centroid_fgs': 'amine,benzene', 'centroid_n_fgs': 2},
         {'cluster_id': 1, 'cluster_weight': 40, 'centroid_fgs': 'amide,ketone', 'centroid_n_fgs': 2},
     ])
+    pattern_clusters = pd.DataFrame([
+        {'pattern_index': 0, 'count': 60, 'cluster_id': 0, 'cluster_memberships': '0'},
+        {'pattern_index': 1, 'count': 10, 'cluster_id': 0, 'cluster_memberships': '0,1'},
+        {'pattern_index': 2, 'count': 30, 'cluster_id': 1, 'cluster_memberships': '1'},
+    ])
     model_specs = pd.DataFrame([
-        {'model_name': 'Small', 'target_coverage': 0.5, 'min_fgs': 1, 'max_fgs': 3},
+        {'model_name': 'All', 'target_coverage': 1.0},
     ])
 
-    assignments = ASSIGN_MODULE.assign_models(
-        cluster_summary,
-        model_specs,
-        total_weight=100,
-    )
-    report = ASSIGN_MODULE.build_report(assignments, total_weight=100)
+    assignments, achieved = ASSIGN_MODULE.assign_models(cluster_summary, model_specs, pattern_clusters)
+    report = ASSIGN_MODULE.build_report(assignments, achieved, model_specs, total_weight=100)
 
-    assert report['effective_coverage'].iloc[0] <= 0.5 + 1e-9
-    assert report['total_cluster_weight'].iloc[0] > 100
+    assert abs(achieved['All'] - 1.0) < 1e-9
+    assert report['n_molecules'].iloc[0] == 100
+    assert report['total_cluster_weight'].iloc[0] == 110
 
 
 def test_patterns_to_matrix_accepts_numeric_matrix_without_string_conversion():
