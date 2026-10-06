@@ -1,3 +1,20 @@
+"""Stage 5: assign whole clusters to models so each model's coverage is as close as possible
+to its target.
+
+Rules:
+  * every cluster is assigned to at least one model;
+  * a cluster is assigned whole or not at all -- never part of its molecules;
+  * a cluster may be assigned to several models (the targets in model_specs.csv may sum to
+    more than 100%, in which case some must be);
+  * a model's coverage = unique molecules in the union of its clusters / all clustered
+    molecules. A molecule that belongs to two clusters given to the same model counts once;
+  * min_fgs / max_fgs in model_specs.csv are ignored: any cluster may go to any model.
+
+Subject to these rules the sum over models of |coverage - target| is minimised exactly, as a
+small integer program (scipy.optimize.milp, i.e. HiGHS). Overlapping memberships are handled
+by grouping patterns into "atoms" that share one membership set; an atom is covered by a
+model if any of its clusters is.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,176 +42,9 @@ TEXT_COLUMNS = {
     'member_cids': str,
 }
 
-REUSE_DECAY = 0.5
-OVERLAP_TOLERANCE = 0.5
-
-
-def assign_models(cluster_summary: pd.DataFrame,
-                  model_specs: pd.DataFrame,
-                  reuse_decay: float = REUSE_DECAY,
-                  overlap_tolerance: float = OVERLAP_TOLERANCE,
-                  total_weight: int | None = None) -> pd.DataFrame:
-    """
-    Assign clusters to models based on target coverage and rules.
-    Returns a long-form DataFrame: one row per (model, cluster).
-
-    A final mandatory pass ensures every cluster is used at least once.
-    If a cluster falls outside the min/max window for all models, it is
-    assigned to the closest model by FG-count distance.
-
-    total_weight is the unique molecule total used as the coverage denominator. This is
-    usually the sum of the unique pattern counts, not the sum of overlapping cluster weights.
-    """
-    if total_weight is None:
-        total_weight = int(cluster_summary['cluster_weight'].sum())
-    cluster_use_count = {cid: 0 for cid in cluster_summary['cluster_id']}
-    assignments = []
-    assigned_cluster_ids = set()
-    model_coverage_used = {
-        spec['model_name']: 0.0 for _, spec in model_specs.iterrows()
-    }
-
-    for _, spec in model_specs.iterrows():
-        model = spec['model_name']
-        target = float(spec['target_coverage'])
-        min_fgs = int(spec.get('min_fgs', 1))
-        max_fgs = int(spec.get('max_fgs', 999))
-        target_weight = target * total_weight
-
-        candidates = cluster_summary[
-            (cluster_summary['centroid_n_fgs'] >= min_fgs) &
-            (cluster_summary['centroid_n_fgs'] <= max_fgs)
-        ].copy()
-
-        reuse_counts = candidates['cluster_id'].map(cluster_use_count).astype(int)
-        candidates = candidates.copy()
-        candidates['effective_weight'] = (
-            candidates['cluster_weight'].astype(float) * (reuse_decay ** reuse_counts.to_numpy())
-        )
-
-        candidates = candidates.sort_values(
-            ['effective_weight', 'centroid_n_fgs'],
-            ascending=[False, False],
-        )
-
-        cumulative = model_coverage_used[model]
-        reused_weight = 0.0
-
-        for _, row in candidates.iterrows():
-            if cumulative >= target_weight:
-                break
-
-            cid = int(row['cluster_id'])
-            w = float(row['effective_weight'])
-            remaining_capacity = max(0.0, target_weight - cumulative)
-            if remaining_capacity <= 0:
-                break
-            w = min(w, remaining_capacity)
-            was_reused = cluster_use_count[cid] > 0
-
-            if was_reused and reused_weight + w > overlap_tolerance * target_weight:
-                continue
-
-            assignments.append({
-                'model_name': model,
-                'cluster_id': cid,
-                'cluster_weight': int(row['cluster_weight']),
-                'effective_weight': round(w, 2),
-                'centroid_fgs': row['centroid_fgs'],
-                'centroid_n_fgs': int(row['centroid_n_fgs']),
-                'was_reused': was_reused,
-                'forced_assignment': False,
-                'target_coverage': target,
-            })
-
-            cumulative += w
-            model_coverage_used[model] = cumulative
-            if was_reused:
-                reused_weight += w
-            cluster_use_count[cid] += 1
-            assigned_cluster_ids.add(cid)
-
-    for _, row in cluster_summary.iterrows():
-        cid = int(row['cluster_id'])
-        if cid in assigned_cluster_ids:
-            continue
-
-        model_candidates = []
-        for _, spec in model_specs.iterrows():
-            model_name = spec['model_name']
-            target = float(spec['target_coverage'])
-            target_weight = target * total_weight
-            remaining_capacity = max(0.0, target_weight - model_coverage_used[model_name])
-            distance = 0 if int(spec['min_fgs']) <= int(row['centroid_n_fgs']) <= int(spec['max_fgs']) else min(
-                abs(int(row['centroid_n_fgs']) - int(spec['min_fgs'])),
-                abs(int(row['centroid_n_fgs']) - int(spec['max_fgs'])),
-            )
-            model_candidates.append((distance, -remaining_capacity, model_name, remaining_capacity))
-
-        valid_candidates = [m for m in model_candidates if m[3] > 0]
-        if valid_candidates:
-            best = min(valid_candidates, key=lambda x: (x[0], x[1]))
-            model_name = best[2]
-            remaining_capacity = best[3]
-            target = float(model_specs.loc[model_specs['model_name'] == model_name, 'target_coverage'].iloc[0])
-            effective_weight = min(float(row['cluster_weight']), remaining_capacity)
-        else:
-            best = min(model_candidates, key=lambda x: (x[0], x[1]))
-            model_name = best[2]
-            effective_weight = 0.0
-            target = float(model_specs.loc[model_specs['model_name'] == model_name, 'target_coverage'].iloc[0])
-
-        assignments.append({
-            'model_name': model_name,
-            'cluster_id': cid,
-            'cluster_weight': int(row['cluster_weight']),
-            'effective_weight': round(effective_weight, 2),
-            'centroid_fgs': row['centroid_fgs'],
-            'centroid_n_fgs': int(row['centroid_n_fgs']),
-            'was_reused': False,
-            'forced_assignment': True,
-            'target_coverage': target,
-        })
-        model_coverage_used[model_name] += effective_weight
-        cluster_use_count[cid] += 1
-        assigned_cluster_ids.add(cid)
-
-    return pd.DataFrame(assignments)
-
-
-def build_report(assignments: pd.DataFrame, total_weight: int) -> pd.DataFrame:
-    """Aggregate per-model coverage, FG set, and overlap stats.
-
-    total_weight should be the unique-molecule denominator rather than the sum of
-    overlapping cluster weights, otherwise repeated memberships artificially dilute coverage.
-    """
-    rows = []
-    for model, group in assignments.groupby('model_name'):
-        total_effective = group['effective_weight'].sum()
-        reused = group[group['was_reused']]
-        fgs = sorted({
-            fg
-            for fgs in group['centroid_fgs']
-            for fg in str(fgs).split(',')
-            if fg
-        })
-
-        rows.append({
-            'model_name': model,
-            'clusters_used': len(group),
-            'clusters_reused': len(reused),
-            'total_cluster_weight': int(group['cluster_weight'].sum()),
-            'effective_coverage': round(total_effective / total_weight, 4),
-            'target_coverage': group['target_coverage'].iloc[0],
-            'coverage_gap': round(
-                group['target_coverage'].iloc[0] - total_effective / total_weight,
-                4,
-            ),
-            'fgs_used': ','.join(fgs),
-            'n_fgs_used': len(fgs),
-        })
-
-    return pd.DataFrame(rows)
+# Per-assignment cost in the objective, in units of coverage fraction. It only breaks ties
+# toward fewer assignments: one assignment costs as much as a millionth of the molecules.
+TIE_BREAK = 1e-6
 
 
 def parse_memberships(value, fallback) -> list:
@@ -202,6 +52,188 @@ def parse_memberships(value, fallback) -> list:
     if pd.isna(value) or not str(value).strip():
         return [int(fallback)]
     return [int(part) for part in str(value).split(',') if part.strip()]
+
+
+def build_atoms(pattern_clusters: pd.DataFrame) -> tuple[list, np.ndarray]:
+    """Group patterns by membership set: returns (sorted cluster-id tuples, molecules per tuple).
+
+    Every molecule in an atom belongs to exactly the clusters in its tuple, so a model covers
+    the whole atom as soon as it is given any one of those clusters.
+    """
+    memberships = (pattern_clusters['cluster_memberships']
+                   if 'cluster_memberships' in pattern_clusters.columns
+                   else pattern_clusters['cluster_id'])
+    totals: dict = {}
+    for value, fallback, n in zip(memberships, pattern_clusters['cluster_id'], pattern_clusters['count']):
+        key = tuple(sorted(set(parse_memberships(value, fallback))))
+        totals[key] = totals.get(key, 0) + int(n)
+    keys = sorted(totals)
+    return keys, np.array([totals[k] for k in keys], dtype=float)
+
+
+def coverage(assign: np.ndarray, atom_sets: list, atom_counts: np.ndarray) -> np.ndarray:
+    """Fraction of molecules each model covers.
+
+    assign is (n_models, n_clusters) bool; atom_sets hold column indices into it.
+    """
+    total = atom_counts.sum()
+    out = np.zeros(assign.shape[0])
+    for a, cols in enumerate(atom_sets):
+        out += assign[:, list(cols)].any(axis=1) * atom_counts[a]
+    return out / total
+
+
+def solve_assignment(atom_sets: list, atom_counts: np.ndarray, n_clusters: int,
+                     targets: np.ndarray, time_limit: float = 600.0):
+    """Return (assign (n_models, n_clusters) bool, proven_optimal, solver message).
+
+    Variables: x[m,c] in {0,1} (cluster c given to model m); y[m,a] in [0,1] (atom a covered
+    by model m), forced to OR(x[m,c] for c in atom a); d[m] >= |coverage[m] - target[m]|.
+    Minimise sum(d) + TIE_BREAK * sum(x) subject to every cluster in >= 1 model.
+    """
+    try:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+        from scipy.sparse import coo_matrix
+    except ImportError as err:
+        raise SystemExit(f'assign_clusters_to_models.py needs scipy >= 1.9 '
+                         f'(scipy.optimize.milp): {err}')
+
+    M, K, A = len(targets), n_clusters, len(atom_sets)
+    share = atom_counts / atom_counts.sum()
+    nx, ny = M * K, M * A
+
+    def xi(m, c):
+        return m * K + c
+
+    def yi(m, a):
+        return nx + m * A + a
+
+    def di(m):
+        return nx + ny + m
+
+    rows, cols, vals, lo, hi = [], [], [], [], []
+
+    def add(entries, lb, ub):
+        r = len(lo)
+        for col, val in entries:
+            rows.append(r)
+            cols.append(col)
+            vals.append(val)
+        lo.append(lb)
+        hi.append(ub)
+
+    for c in range(K):  # every cluster in at least one model
+        add([(xi(m, c), 1.0) for m in range(M)], 1.0, np.inf)
+    for m in range(M):  # y[m,a] = OR of x[m,c] over the atom's clusters
+        for a, atom in enumerate(atom_sets):
+            add([(yi(m, a), 1.0)] + [(xi(m, c), -1.0) for c in atom], -np.inf, 0.0)
+            for c in atom:
+                add([(yi(m, a), 1.0), (xi(m, c), -1.0)], 0.0, np.inf)
+    for m in range(M):  # d[m] >= target - coverage and d[m] >= coverage - target
+        cov = [(yi(m, a), share[a]) for a in range(A)]
+        add([(di(m), 1.0)] + [(col, -v) for col, v in cov], -targets[m], np.inf)
+        add([(di(m), 1.0)] + cov, targets[m], np.inf)
+
+    n = nx + ny + M
+    objective = np.zeros(n)
+    objective[:nx] = TIE_BREAK
+    objective[nx + ny:] = 1.0
+    integrality = np.zeros(n)
+    integrality[:nx] = 1
+    upper = np.ones(n)
+    upper[nx + ny:] = np.inf
+    constraints = LinearConstraint(coo_matrix((vals, (rows, cols)), shape=(len(lo), n)).tocsr(),
+                                   np.array(lo), np.array(hi))
+    res = milp(objective, constraints=constraints, integrality=integrality,
+               bounds=Bounds(np.zeros(n), upper),
+               options={'time_limit': time_limit, 'mip_rel_gap': 1e-9, 'disp': False})
+    if res.x is None:
+        return None, False, res.message
+    return res.x[:nx].reshape(M, K) > 0.5, res.status == 0, res.message
+
+
+def assign_models(cluster_summary: pd.DataFrame,
+                  model_specs: pd.DataFrame,
+                  pattern_clusters: pd.DataFrame | None = None,
+                  time_limit: float = 600.0) -> tuple[pd.DataFrame, pd.Series]:
+    """Assign whole clusters to models. Returns (assignments, coverage by model_name).
+
+    assignments has one row per (model, cluster). pattern_clusters (one row per pattern with
+    `count`, `cluster_id` and `cluster_memberships`) is needed to count molecules that sit in
+    two clusters once; without it the clusters are treated as disjoint, sized by
+    cluster_weight.
+    """
+    cluster_ids = [int(c) for c in cluster_summary['cluster_id']]
+    column = {c: i for i, c in enumerate(cluster_ids)}
+    if pattern_clusters is None or pattern_clusters.empty:
+        atom_ids = [(c,) for c in cluster_ids]
+        atom_counts = cluster_summary['cluster_weight'].astype(float).to_numpy()
+    else:
+        atom_ids, atom_counts = build_atoms(pattern_clusters)
+        unknown = sorted({c for atom in atom_ids for c in atom} - set(cluster_ids))
+        if unknown:
+            raise ValueError(f'pattern memberships name clusters {unknown} that are not in the '
+                             f'cluster summary; re-run label_clusters.py on the current '
+                             f'pattern_clusters.csv.')
+    atom_sets = [tuple(column[c] for c in atom) for atom in atom_ids]
+
+    targets = model_specs['target_coverage'].astype(float).to_numpy()
+    assign, optimal, message = solve_assignment(atom_sets, atom_counts, len(cluster_ids),
+                                                targets, time_limit)
+    if assign is None:
+        raise RuntimeError(f'the solver found no assignment: {message}')
+    if not optimal:
+        print(f'WARNING: the solver stopped before proving optimality ({message}); using the '
+              f'best assignment it found.')
+
+    achieved = coverage(assign, atom_sets, atom_counts)
+    n_models = assign.sum(axis=0)
+    rows = []
+    for m, spec in model_specs.reset_index(drop=True).iterrows():
+        for c in np.flatnonzero(assign[m]):
+            cluster = cluster_summary.iloc[c]
+            rows.append({
+                'model_name': spec['model_name'],
+                'cluster_id': cluster_ids[c],
+                'cluster_weight': int(cluster['cluster_weight']),
+                'centroid_fgs': cluster['centroid_fgs'],
+                'centroid_n_fgs': int(cluster['centroid_n_fgs']),
+                'n_models_for_cluster': int(n_models[c]),
+                'was_reused': bool(n_models[c] > 1),
+                'target_coverage': float(spec['target_coverage']),
+            })
+    assignments = pd.DataFrame(rows)
+    return assignments, pd.Series(achieved, index=model_specs['model_name'].to_numpy())
+
+
+def build_report(assignments: pd.DataFrame, achieved: pd.Series, model_specs: pd.DataFrame,
+                 total_weight: int) -> pd.DataFrame:
+    """One row per model in model_specs, including models that received no cluster.
+
+    effective_coverage is the model's share of unique clustered molecules; coverage_gap is
+    target - effective_coverage.
+    """
+    rows = []
+    for _, spec in model_specs.iterrows():
+        model = spec['model_name']
+        group = assignments[assignments['model_name'] == model] if len(assignments) else assignments
+        fgs = sorted({fg for value in group.get('centroid_fgs', [])
+                      for fg in str(value).split(',') if fg and fg != 'nan'})
+        cov = float(achieved.get(model, 0.0))
+        target = float(spec['target_coverage'])
+        rows.append({
+            'model_name': model,
+            'clusters_used': len(group),
+            'clusters_reused': int(group['was_reused'].sum()) if len(group) else 0,
+            'total_cluster_weight': int(group['cluster_weight'].sum()) if len(group) else 0,
+            'n_molecules': int(round(cov * total_weight)),
+            'effective_coverage': round(cov, 4),
+            'target_coverage': target,
+            'coverage_gap': round(target - cov, 4),
+            'fgs_used': ','.join(fgs),
+            'n_fgs_used': len(fgs),
+        })
+    return pd.DataFrame(rows)
 
 
 def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame) -> pd.DataFrame:
@@ -241,26 +273,38 @@ def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame)
 def main():
     cluster_summary = pd.read_csv(CLUSTER_SUMMARY)
     model_specs = pd.read_csv(MODEL_SPECS)
-    pattern_clusters = pd.read_csv(OUTPUT_DIR / 'pattern_clusters.csv', dtype=TEXT_COLUMNS) if (OUTPUT_DIR / 'pattern_clusters.csv').exists() else pd.DataFrame()
-    total_weight = int(pattern_clusters['count'].sum()) if not pattern_clusters.empty and 'count' in pattern_clusters.columns else int(cluster_summary['cluster_weight'].sum())
+    pattern_file = OUTPUT_DIR / 'pattern_clusters.csv'
+    pattern_clusters = pd.read_csv(pattern_file, dtype=TEXT_COLUMNS) if pattern_file.exists() else pd.DataFrame()
+    if pattern_clusters.empty:
+        print(f'WARNING: {pattern_file.name} not found; treating clusters as disjoint, so '
+              f'molecules in two clusters may be counted twice.')
+        total_weight = int(cluster_summary['cluster_weight'].sum())
+    else:
+        total_weight = int(pattern_clusters['count'].sum())
+    if {'min_fgs', 'max_fgs'} & set(model_specs.columns):
+        print('note: min_fgs / max_fgs in model_specs.csv are ignored; any cluster may go to '
+              'any model.')
 
-    print(f'Total molecule weight across all clusters: {total_weight}')
-    print(f'Models to fit: {len(model_specs)}')
+    print(f'Clustered molecules: {total_weight}')
+    print(f'Models to fit: {len(model_specs)}  (targets sum to '
+          f'{100 * model_specs["target_coverage"].sum():.0f}% of molecules)')
     print()
 
-    assignments = assign_models(cluster_summary, model_specs, total_weight=total_weight)
+    assignments, achieved = assign_models(cluster_summary, model_specs, pattern_clusters)
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
     build_lineage_map(assignments, pattern_clusters).to_csv(PATTERN_MODEL_MAP, index=False)
 
-    report = build_report(assignments, total_weight)
+    report = build_report(assignments, achieved, model_specs, total_weight)
     report.to_csv(MODEL_REPORT, index=False)
 
+    shared = assignments.drop_duplicates('cluster_id')['was_reused'].sum()
     print(f'Wrote {len(assignments)} assignments to {MODEL_ASSIGNMENTS}')
+    print(f'{int(shared)} of {len(cluster_summary)} clusters are assigned to more than one model')
     print(f'Wrote {len(report)} model reports to {MODEL_REPORT}')
     print(f'Wrote pattern-to-model lineage map to {PATTERN_MODEL_MAP}')
     print()
-    print(report.to_string(index=False))
+    print(report.drop(columns=['fgs_used']).to_string(index=False))
 
 
 if __name__ == '__main__':
