@@ -39,6 +39,7 @@ MODEL_SPECS = OUTPUT_DIR / 'model_specs.csv'
 MODEL_ASSIGNMENTS = OUTPUT_DIR / 'model_assignments.csv'
 MODEL_REPORT = OUTPUT_DIR / 'model_coverage_report.csv'
 PATTERN_MODEL_MAP = OUTPUT_DIR / 'pattern_cluster_model_map.csv'
+MODEL_MOLECULE_COUNTS = OUTPUT_DIR / 'model_molecule_counts.csv'
 ASSIGNMENT_WARNINGS = OUTPUT_DIR / 'assignment_warnings.txt'
 
 EXIT_NEEDS_MORE_CLUSTERS = 3
@@ -310,6 +311,58 @@ def build_lineage_map(assignments: pd.DataFrame, pattern_clusters: pd.DataFrame)
     return lineage.sort_values(['model_name', 'cluster_id', 'pattern_index']).reset_index(drop=True)
 
 
+def model_molecule_counts(lineage: pd.DataFrame, model_specs: pd.DataFrame,
+                          total_molecules: int) -> pd.DataFrame | None:
+    """Unique molecules per model, counted by cid from the lineage map.
+
+    One row per model in model_specs, then an 'ALL MODELS' row:
+      n_unique_molecules     distinct cids in the model's clusters; a molecule in two of the
+                             model's clusters counts once
+      coverage               n_unique_molecules / all clustered molecules
+      n_exclusive_molecules  of those, molecules in no other model
+      n_shared_molecules     of those, molecules also in at least one other model
+      n_clusters, n_patterns clusters and FG patterns behind the model
+    Returns None when the lineage map has no member_cids.
+    """
+    if 'member_cids' not in lineage.columns:
+        return None
+    rows = lineage.dropna(subset=['member_cids'])
+    long = (rows.assign(cid=rows['member_cids'].astype(str).str.split(','))
+            .explode('cid')[['model_name', 'cluster_id', 'pattern_index', 'cid']])
+    long['cid'] = long['cid'].str.strip()
+    pairs = long[['model_name', 'cid']].drop_duplicates()
+    models_per_cid = pairs.groupby('cid')['model_name'].nunique()
+    pairs = pairs.assign(n_models=pairs['cid'].map(models_per_cid).to_numpy())
+
+    out = []
+    for _, spec in model_specs.iterrows():
+        model = spec['model_name']
+        mine = pairs[pairs['model_name'] == model]
+        used = long[long['model_name'] == model]
+        out.append({
+            'model_name': model,
+            'target_coverage': float(spec['target_coverage']),
+            'n_unique_molecules': len(mine),
+            'coverage': round(len(mine) / total_molecules, 4) if total_molecules else 0.0,
+            'n_exclusive_molecules': int((mine['n_models'] == 1).sum()),
+            'n_shared_molecules': int((mine['n_models'] > 1).sum()),
+            'n_clusters': int(used['cluster_id'].nunique()),
+            'n_patterns': int(used['pattern_index'].nunique()),
+        })
+    union = int(pairs['cid'].nunique())
+    out.append({
+        'model_name': 'ALL MODELS',
+        'target_coverage': float(model_specs['target_coverage'].sum()),
+        'n_unique_molecules': union,
+        'coverage': round(union / total_molecules, 4) if total_molecules else 0.0,
+        'n_exclusive_molecules': int((models_per_cid == 1).sum()),
+        'n_shared_molecules': int((models_per_cid > 1).sum()),
+        'n_clusters': int(long['cluster_id'].nunique()),
+        'n_patterns': int(long['pattern_index'].nunique()),
+    })
+    return pd.DataFrame(out)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -343,7 +396,8 @@ def main(argv=None) -> int:
                                           time_limit=args.time_limit)
     assignments.to_csv(MODEL_ASSIGNMENTS, index=False)
 
-    build_lineage_map(assignments, pattern_clusters).to_csv(PATTERN_MODEL_MAP, index=False)
+    lineage = build_lineage_map(assignments, pattern_clusters)
+    lineage.to_csv(PATTERN_MODEL_MAP, index=False)
 
     report = build_report(assignments, achieved, model_specs, total_weight,
                           tolerance=args.tolerance)
@@ -356,6 +410,20 @@ def main(argv=None) -> int:
     print(f'Wrote pattern-to-model lineage map to {PATTERN_MODEL_MAP}')
     print()
     print(report.drop(columns=['fgs_used']).to_string(index=False))
+
+    counts = model_molecule_counts(lineage, model_specs, total_weight)
+    if counts is None:
+        print(f'\nnote: {pattern_file.name} has no member_cids, so {MODEL_MOLECULE_COUNTS.name} '
+              f'was not written.')
+    else:
+        counts.to_csv(MODEL_MOLECULE_COUNTS, index=False)
+        print(f'\nUnique molecules per model (by cid), written to {MODEL_MOLECULE_COUNTS}:')
+        print(counts.to_string(index=False))
+        union = int(counts['n_unique_molecules'].iloc[-1])
+        if union != total_weight:
+            print(f'note: {union} distinct cids across all models, but {total_weight} clustered '
+                  f'molecules. Duplicate cids in the input, or clusters that reached no model, '
+                  f'cause this.')
 
     if report['within_tolerance'].all():
         if ASSIGNMENT_WARNINGS.exists():
