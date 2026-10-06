@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
+PRUNE_THRESHOLD = 1e-3  # default for --prune-threshold; see bernoulli_mixture_em
 
 PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
 MOLECULE_PATTERNS = OUTPUT_DIR / 'molecule_patterns.csv'
@@ -45,6 +46,7 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
         top_n=top_n,
         seed=seed,
         verbose=True,
+        prune_threshold=PRUNE_THRESHOLD,
     )
 
     canonical_df = clustered.copy().sort_values(['cluster_id', 'pattern_index']).reset_index(drop=True)
@@ -89,7 +91,12 @@ if __name__ == '__main__':
     parser.add_argument('--top-n', type=int, default=2, help='Maximum number of clusters a pattern can join.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed for deterministic initialization.')
     parser.add_argument('--k', type=int, default=None, help='Deprecated alias for max-components.')
+    parser.add_argument('--prune-threshold', type=float, default=PRUNE_THRESHOLD,
+                        help='Drop components whose mixing weight ends at or below this fraction of '
+                             'molecules (default 0.001), then re-fit the rest. Lower it if a larger '
+                             '--max-components does not produce more clusters.')
     args = parser.parse_args()
+    PRUNE_THRESHOLD = args.prune_threshold
 
     if args.k is not None:
         max_components = args.k
