@@ -6,6 +6,12 @@ and writes to csv_outputs/:
   pubchem_like_pattern_counts.csv   pattern_index, pattern, count   one row per unique pattern
   molecule_patterns.csv             cid, pattern_index              one row per molecule
   fg_columns.json                   FG names, in pattern-bit order
+  molecule_status.csv               cid, status, detail             one row per input molecule
+
+molecule_status.csv accounts for every input molecule: `clustered` (has at least one FG, so
+stage 3 gives it at least one cluster), `rejected_no_fg`, or a stage-1 rejection carried
+over -- `rejected_salt_or_mixture`, `rejected_unparseable`, `rejected_accfg_error` -- read
+from fg_matrix.py's _rejects/ or from csv_outputs/rejected_molecules.csv.
 
 Input, one of:
   * csv_outputs/fg_presence.csv from build_sample_fg_dataset.py (the default), or
@@ -38,6 +44,8 @@ FG_PRESENCE = OUTPUT_DIR / 'fg_presence.csv'
 PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
 MOLECULE_PATTERNS = OUTPUT_DIR / 'molecule_patterns.csv'
 FG_COLUMNS = OUTPUT_DIR / 'fg_columns.json'
+MOLECULE_STATUS = OUTPUT_DIR / 'molecule_status.csv'
+STAGE1_REJECTS = OUTPUT_DIR / 'rejected_molecules.csv'  # build_sample_fg_dataset.py, if present
 
 KEY_COLUMNS = ('cid', 'Molecule', 'pattern_index')
 _ZERO = np.uint8(ord('0'))
@@ -112,6 +120,34 @@ def compress(chunks) -> tuple[list, pd.DataFrame, pd.DataFrame]:
     return fg_names, patterns, molecules
 
 
+def molecule_status(patterns: pd.DataFrame, molecules: pd.DataFrame,
+                    rejects: pd.DataFrame) -> pd.DataFrame:
+    """One row per input molecule: cid, status, detail."""
+    no_fg = set(patterns.loc[~patterns['pattern'].str.contains('1'), 'pattern_index'])
+    kept = pd.DataFrame({
+        'cid': molecules['cid'],
+        'status': np.where(molecules['pattern_index'].isin(no_fg), 'rejected_no_fg', 'clustered'),
+        'detail': '',
+    })
+    return pd.concat([kept, rejects], ignore_index=True)
+
+
+def read_stage1_rejects(fg_dir: Path | None) -> pd.DataFrame:
+    """Molecules stage 1 dropped, as cid, status, detail."""
+    rows = []
+    if fg_dir is not None:
+        # fg_matrix.py: one `cid<TAB>smiles<TAB>code<TAB>detail` line per molecule
+        for path in sorted((fg_dir / '_rejects').glob('*.txt')):
+            for line in path.read_text(encoding='utf-8').splitlines():
+                parts = line.split('\t', 3)
+                if len(parts) >= 3:
+                    rows.append((parts[0], f'rejected_{parts[2]}', parts[3] if len(parts) > 3 else ''))
+    elif STAGE1_REJECTS.exists():
+        df = pd.read_csv(STAGE1_REJECTS, dtype={'cid': str})
+        rows = [(cid, f'rejected_{reason}', '') for cid, reason in zip(df['cid'], df['reason'])]
+    return pd.DataFrame(rows, columns=['cid', 'status', 'detail'])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -128,10 +164,15 @@ def main(argv=None):
     counts_df.to_csv(PATTERN_OUTPUT, index=False)
     molecules.to_csv(MOLECULE_PATTERNS, index=False)
     FG_COLUMNS.write_text(json.dumps(fg_names, indent=1))
+    status = molecule_status(counts_df, molecules, read_stage1_rejects(args.fg_dir))
+    status.to_csv(MOLECULE_STATUS, index=False)
 
     print(f'Read {len(molecules)} molecules and {len(fg_names)} FG columns from {source}')
     print(f'Wrote {len(counts_df)} unique patterns to {PATTERN_OUTPUT}')
     print(f'Wrote molecule -> pattern map to {MOLECULE_PATTERNS}')
+    print(f'Wrote the status of all {len(status)} input molecules to {MOLECULE_STATUS}:')
+    for name, n in status['status'].value_counts().sort_index().items():
+        print(f'  {name:<26} {n:>10}')
     print(counts_df.head(10).to_string(index=False))
 
 
