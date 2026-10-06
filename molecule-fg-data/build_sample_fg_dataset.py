@@ -22,34 +22,61 @@ SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
 FG_OUTPUT = OUTPUT_DIR / 'fg_presence.csv'
 
 
-def load_smiles_records(dataset_path: Path):
+def _json_items(payload, dataset_path: Path) -> list:
+    """The list of molecule entries in smiles.json: the top-level list, or the list under a
+    'smiles' or 'molecules' key."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('smiles', 'molecules'):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    raise ValueError(f'Unsupported JSON structure in {dataset_path}')
+
+
+def load_smiles_records(dataset_path: Path) -> tuple[list, bool]:
+    """Return ([(cid, smiles), ...], ids_are_positions).
+
+    Source IDs are kept when the input carries them: smiles.json entries that are objects
+    with 'cid' and 'smiles' keys, or a CSV with a 'cid' column. For a plain list of SMILES
+    strings (or a CSV without 'cid') the only ID available is the entry's position in the
+    file, and ids_are_positions is True.
+    """
     if dataset_path.suffix.lower() == '.json':
-        payload = json.loads(dataset_path.read_text())
-        if isinstance(payload, list):
-            return [(idx, str(s).strip()) for idx, s in enumerate(payload) if str(s).strip()]
-        if isinstance(payload, dict):
-            if 'smiles' in payload and isinstance(payload['smiles'], list):
-                records = payload['smiles']
-                return [(idx, str(s).strip()) for idx, s in enumerate(records) if str(s).strip()]
-            if 'molecules' in payload and isinstance(payload['molecules'], list):
-                records = payload['molecules']
-                return [(idx, str(s).strip()) for idx, s in enumerate(records) if str(s).strip()]
-        raise ValueError(f'Unsupported JSON structure in {dataset_path}')
+        items = _json_items(json.loads(dataset_path.read_text()), dataset_path)
+        records, positional = [], False
+        for idx, item in enumerate(items):
+            if isinstance(item, dict):
+                if 'cid' not in item:
+                    raise ValueError(f'{dataset_path}: entry {idx} has no "cid" key')
+                cid, smiles = item['cid'], str(item.get('smiles', '')).strip()
+            else:
+                cid, smiles, positional = idx, str(item).strip(), True
+            if smiles:
+                records.append((int(cid), smiles))
+        return records, positional
 
     dataset = pd.read_csv(dataset_path)
     if 'cid' in dataset.columns:
-        return [(int(row['cid']), str(row['smiles']).strip()) for _, row in dataset.iterrows() if str(row['smiles']).strip()]
-    return [(idx, str(row['smiles']).strip()) for idx, row in dataset.iterrows() if str(row['smiles']).strip()]
+        return [(int(row['cid']), str(row['smiles']).strip()) for _, row in dataset.iterrows()
+                if str(row['smiles']).strip()], False
+    return [(idx, str(row['smiles']).strip()) for idx, row in dataset.iterrows()
+            if str(row['smiles']).strip()], True
 
 
 def load_smiles_list(dataset_path: Path):
-    return [smiles for _, smiles in load_smiles_records(dataset_path)]
+    """The SMILES in load_smiles_records order."""
+    return [smiles for _, smiles in load_smiles_records(dataset_path)[0]]
 
 
 def main():
     source_path = SMILES_JSON if SMILES_JSON.exists() else SAMPLE_DATASET
     afg = AccFG(print_load_info=False, lite=False)
-    smiles_records = load_smiles_records(source_path)
+    smiles_records, ids_are_positions = load_smiles_records(source_path)
+    if ids_are_positions:
+        print(f'WARNING: {source_path.name} has no molecule IDs, so the cid column holds each '
+              f"molecule's position in the file, not a source (e.g. PubChem) CID. Give each "
+              f'entry as {{"cid": ..., "smiles": ...}} to keep the source IDs.')
     smiles_list = [smiles for _, smiles in smiles_records]
 
     patterns = pattern_count_dictionary(afg, smiles_list, canonical=True)
