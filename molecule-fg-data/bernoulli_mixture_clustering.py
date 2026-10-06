@@ -127,10 +127,16 @@ def patterns_to_matrix(patterns: list[str] | np.ndarray) -> np.ndarray:
 
 
 def assign_overlapping(resp: np.ndarray, tau: float = 0.3, top_n: int | None = 2) -> list[list[int]]:
-    """Return overlapping cluster assignments for each pattern row."""
+    """Return overlapping cluster assignments for each pattern row.
+
+    Each list starts with the row's most probable cluster, which callers use as the primary
+    cluster, followed by any other cluster with posterior >= tau, in descending probability,
+    up to top_n clusters in total. The list is deliberately not sorted by cluster id: that
+    would make the lowest id the primary cluster.
+    """
     memberships: list[list[int]] = []
     for row in resp:
-        order = np.argsort(-row)
+        order = np.argsort(-row, kind='stable')
         picked = [int(order[0])]
         for cluster_id in order[1:]:
             cluster_idx = int(cluster_id)
@@ -138,7 +144,7 @@ def assign_overlapping(resp: np.ndarray, tau: float = 0.3, top_n: int | None = 2
                 break
             if row[cluster_idx] >= tau:
                 picked.append(cluster_idx)
-        memberships.append(sorted(set(picked)))
+        memberships.append(picked)
     return memberships
 
 
