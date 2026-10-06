@@ -257,6 +257,12 @@ python3 "molecule-fg-data/assign_clusters_to_models.py"
 
 That produces the full pipeline result.
 
+On an LSF cluster, `cluster.lsf` runs stages 2–5 as one job (edit the paths block at the top first):
+
+```bash
+bsub < molecule-fg-data/cluster.lsf
+```
+
 ## If `smiles.json` is missing
 
 The scripts gracefully fall back to:
