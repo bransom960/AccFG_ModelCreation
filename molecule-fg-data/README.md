@@ -82,6 +82,7 @@ Outputs:
 - `csv_outputs/pubchem_like_pattern_counts.csv`
 - `csv_outputs/molecule_patterns.csv` — `cid, pattern_index`, one row per molecule
 - `csv_outputs/fg_columns.json` — FG names in pattern-bit order
+- `csv_outputs/molecule_status.csv` — `cid, status, detail` for every input molecule: `clustered`, `rejected_no_fg`, or the stage-1 reason it was dropped (`rejected_salt_or_mixture`, `rejected_unparseable`, `rejected_accfg_error`)
 
 Stages 3 and 4 read these files instead of `smiles.json`, so every stage works from the same molecules and the same `pattern_index`.
 
