@@ -205,6 +205,8 @@ Assignment rules:
 
 The minimisation is exact: a small integer program solved with `scipy.optimize.milp` (scipy ≥ 1.9). Because clusters are whole, a model can end above or below its target; `coverage_gap` in the report (target − coverage) shows by how much, and models that received no cluster are listed with coverage 0.
 
+If any model ends more than `--tolerance` (default `0.02`, i.e. ±2 percentage points) from its target, the clusters are too coarse for the targets. All outputs are still written, but the script then prints a message naming each model that misses and the cluster sizes, saying to re-run `build_pattern_clusters.py` with a larger `--max-components`, saves it to `csv_outputs/assignment_warnings.txt`, and exits with status **3**. `within_tolerance` in the report shows which models pass.
+
 ## The model rule file
 
 The model rules live in:
