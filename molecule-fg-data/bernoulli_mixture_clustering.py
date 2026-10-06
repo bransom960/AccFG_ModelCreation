@@ -105,25 +105,28 @@ def bernoulli_mixture_em(
 
 
 def patterns_to_matrix(patterns: list[str] | np.ndarray) -> np.ndarray:
-    """Convert binary strings or numeric matrices into a 0/1 numpy array.
+    """Convert binary pattern strings, or an existing numeric 0/1 matrix, to an int8 matrix.
 
-    If a numeric matrix is already supplied, keep it as-is instead of re-wrapping every
-    character into Python ints.
+    A numeric matrix is returned as int8 without conversion. Strings are converted in one
+    pass over a single bytes buffer instead of one Python int() per character, which matters
+    with hundreds of thousands of 534-character patterns.
     """
-    if isinstance(patterns, np.ndarray):
-        arr = np.asarray(patterns, dtype=np.int8)
-        if arr.ndim == 1 and arr.size > 0 and isinstance(patterns[0], str):
-            return np.fromiter((int(ch) for ch in patterns[0]), dtype=np.int8).reshape(1, -1)
-        return arr
-
+    if isinstance(patterns, np.ndarray) and patterns.dtype.kind in 'biuf':
+        return np.asarray(patterns, dtype=np.int8)
+    patterns = list(patterns)
     if not patterns:
         return np.zeros((0, 0), dtype=np.int8)
-    if isinstance(patterns[0], str):
-        rows = [np.fromiter((int(ch) for ch in pattern), dtype=np.int8) for pattern in patterns]
-        if not rows:
-            return np.zeros((0, 0), dtype=np.int8)
-        return np.vstack(rows)
-    return np.asarray(patterns, dtype=np.int8)
+    if not isinstance(patterns[0], str):
+        return np.asarray(patterns, dtype=np.int8)
+
+    width = len(patterns[0])
+    buffer = ''.join(patterns).encode('ascii')
+    if len(buffer) != width * len(patterns):
+        raise ValueError('patterns are not all the same length')
+    bits = np.frombuffer(buffer, dtype=np.uint8) - np.uint8(ord('0'))
+    if bits.size and bits.max() > 1:
+        raise ValueError("patterns may only contain '0' and '1'")
+    return bits.astype(np.int8).reshape(len(patterns), width)
 
 
 def assign_overlapping(resp: np.ndarray, tau: float = 0.3, top_n: int | None = 2) -> list[list[int]]:
