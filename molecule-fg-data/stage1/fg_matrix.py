@@ -6,8 +6,11 @@ spreadsheet.py) across processes, and writes one Parquet part per task into an o
 directory that IS the final dataset -- no merge step. Every part has columns
 `cid, Molecule, <one uint8 column per FG>`.
 
-Salts and mixtures (any SMILES containing '.') are rejected before AccFG runs. Every
-rejected molecule is listed with its cid in _rejects/, so each input cid is accounted for.
+Salts and mixtures (any SMILES containing '.') are rejected before AccFG runs.
+extract_smiles.py already excludes them before sampling, so normally none arrive here and
+the sample size is unaffected; the check stays as a safeguard for shards made another way.
+Every rejected molecule is listed with its cid in _rejects/, so each input cid is
+accounted for.
 
 Requires: pip install accfg rdkit pyarrow. On a headless machine `import accfg` needs
 the X11 library libXrender (AccFG imports RDKit's drawing code); see RUNBOOK.md.

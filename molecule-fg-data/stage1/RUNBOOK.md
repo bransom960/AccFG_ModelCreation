@@ -8,10 +8,10 @@ scripts named here are in this folder (`molecule-fg-data/stage1/`).
 ```
 /data/jsonl/*.jsonl          355 files
         │
-        │  extract_smiles.py          random 3% of lines from EVERY file,
-        │                             `smiles` field             [minutes; reads every file]
+        │  extract_smiles.py          exactly 500k molecules, uniform over ALL files,
+        │                             salts/mixtures excluded    [minutes; reads every file twice]
         ▼
-/data/smiles/*.smi           one `cid<TAB>smiles` per line    (target ~5M SMILES)
+/data/smiles/*.smi           one `cid<TAB>smiles` per line    (500,000 molecules in total)
         │
         │  fg_matrix.py               drops salts/mixtures,      [~170 mol/s per core:
         ▼                             runs AccFG                  ~8 core-hours per 5M]
@@ -110,26 +110,39 @@ Confirms on your real files what we established on samples: `c-smiles` is stereo
 (use `smiles`), and neither field is RDKit-canonical. Worth running once before a
 multi-hour job.
 
-## Step 4 — extract a 3% sample of SMILES  (minutes, parallel)
+## Step 4 — sample 500,000 molecules  (minutes, parallel)
 
 ```bash
-python extract_smiles.py /data/jsonl -o /data/smiles -j $(nproc) --resume
+python extract_smiles.py /data/jsonl -o /data/smiles --glob 'processed_Compound_*.jsonl' \
+       --target 500000 --resume
 ```
 
-**Samples a random 3% of the lines in every file by default** (`--fraction 0.03`). The
-sampled lines are spread across each whole file rather than taken from its head, since the
-files are in CID order. It is seeded (`--seed 0`), so re-running gives exactly the same
-lines regardless of `-j`. `--fraction 1` takes everything.
+**Samples exactly `--target` molecules (default 500,000), uniformly over all files.** A
+record is eligible if it has a SMILES and a `cid` and is not a salt or mixture (no `.` in
+the SMILES). Every eligible record has the same chance of being picked, however the files
+are sized.
 
-Sampling does not make this step much faster: every line still has to be read to find the
-3%. Skipped lines are never parsed, though, so it is I/O-bound.
+- **Pass 1** counts the eligible records in every file and caches the counts in
+  `_eligible_counts.json`.
+- Each file's quota is then drawn in one go (a multivariate-hypergeometric draw over the
+  counts), which is what a uniform sample of the whole pool implies. The quotas are saved in
+  `_quotas.json`.
+- **Pass 2** picks each file's quota at random positions spread over the whole file, since
+  the files are in CID order.
 
-**Check the total at the end of the run.** It prints `smiles written`. The 5M target
-assumes ~500k lines per file, but the one real file seen so far
-(`processed_Compound_176000001_176500000.jsonl`) has **62,628** lines. Its name spans
-500k CIDs, but it holds far fewer records. If the other files are similar, 3% gives
-~0.7M, not 5M. To change the fraction afterwards, use a fresh `--outdir`: the script
-records its parameters in `_params.json` and refuses to resume with different ones.
+Salts are excluded *before* sampling, so they do not eat into the 500,000; `fg_matrix.py`
+still checks for them, but should find none. A picked SMILES that RDKit cannot parse is
+replaced by another random eligible record from the same file, so the shards hold exactly
+500,000 parseable molecules.
+
+**Check the end of the log.** It prints the number of molecules on disk, and exits with an
+error if that differs from the target, or if the files hold fewer eligible records than the
+target. It is seeded (`--seed 0`): re-running gives the same molecules regardless of `-j`.
+To change the target or seed, use a fresh `--outdir`; the script records its parameters in
+`_params.json` and refuses to resume with different ones.
+
+The older per-file sampling is still available as `--fraction F` (salts are dropped there
+too), but then the total is whatever fraction F of the lines turns out to be.
 
 Defaults to `--field smiles`, which preserves stereochemistry. **Do not use
 `--field c-smiles`** — it has stereo stripped and would mis-call stereo-defined groups.
@@ -138,7 +151,7 @@ Each line is `cid<TAB>smiles` (`--id-field cid`). Records with no `cid` are skip
 counted as `no ID` in the log. Shards written by the older, ID-less version are refused
 by `fg_matrix.py`.
 
-Add `--dedupe` to drop repeated SMILES within each shard, keeping the first `cid`. The
+With `--fraction`, add `--dedupe` to drop repeated SMILES within each shard, keeping the first `cid`. The
 dropped duplicates' IDs do not reach any later stage. If duplication is material, dedupe
 across shards too. This keys on the SMILES column only, so each kept line keeps its own `cid`:
 
