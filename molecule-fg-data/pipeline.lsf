@@ -1,0 +1,115 @@
+#!/bin/bash
+# The whole pipeline as ONE LSF job, stage after stage:
+#   1a  stage1/extract_smiles.py          sample TARGET molecules (no salts) from the JSONL files
+#   1b  stage1/fg_matrix.py               AccFG functional-group matrix, cid kept
+#   2   build_pattern_count_dictionary.py unique FG patterns, cid -> pattern, molecule status
+#   3   build_pattern_clusters.py         Bernoulli-mixture clusters
+#   4   label_clusters.py                 cluster FG labels
+#   5   assign_clusters_to_models.py      whole clusters -> models, coverage report
+#
+# Submit with:   bsub < molecule-fg-data/pipeline.lsf
+# (the "<" is required: `bsub pipeline.lsf` runs the file as a plain command and ignores
+#  every #BSUB line below -- no core count, memory or time limit).
+#
+# Outputs: stage 1 writes to $WORK/smiles and $WORK/fg; stages 2-5 write to
+# molecule-fg-data/csv_outputs/ (outputs of an earlier run are first moved to
+# csv_outputs/previous_<date>/; model_specs.csv stays).
+#
+# Exit status: that of the first stage that fails. Stage 5 exits with 3 when the clusters
+# are too coarse to meet the model coverage targets; csv_outputs/assignment_warnings.txt
+# says what to change. Raise MAX_COMPONENTS (and, if it says so, lower PRUNE_THRESHOLD) and
+# resubmit: stage 1 resumes from its finished outputs, so only stages 2-5 run again.
+#
+# Sizing (estimates; check your first run's log): stage 1b dominates, at ~100 mol/s per
+# slot on Python 3.9 / AccFG 0.0.7 or ~200 on Python 3.10+ / AccFG 0.1.0, so 500k molecules
+# take about 5-10 minutes on 16 slots. Each stage-1b worker peaks at ~210 MB.
+
+#BSUB -J fg_pipeline
+#BSUB -n 16
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=500]"
+#BSUB -W 6:00
+#BSUB -o fg_pipeline.%J.log
+##BSUB -q your_queue_name           # uncomment and set if your site requires a queue
+#
+# span[hosts=1]: the stage-1 scripts use worker processes, which cannot cross nodes.
+# rusage[mem=500]: per slot or per job, MB or GB, is a site setting (see stage1/fg.lsf).
+
+set -euo pipefail
+
+# ---- edit these ---------------------------------------------------------------------
+PIPELINE=$HOME/molecule-fg-data          # this folder, as uploaded to the cluster
+JSONL_DIR=/path/to/jsonl                 # the processed_Compound_*.jsonl files
+GLOB='processed_Compound_*.jsonl'
+TARGET=500000                            # molecules to sample (salts excluded)
+WORK=/path/to/scratch/fg_run             # stage-1 outputs; scratch is better than $HOME
+MAX_COMPONENTS=12                        # upper bound on the number of clusters
+PRUNE_THRESHOLD=0.001                    # drop clusters with mixing weight <= this
+TOLERANCE=0.02                           # allowed |coverage - target| per model
+SEED=0
+# module load python/3.11                # or: source ~/miniforge3/bin/activate accfg
+# --------------------------------------------------------------------------------------
+
+SMILES_DIR=$WORK/smiles
+FG_DIR=$WORK/fg
+OUT=$PIPELINE/csv_outputs
+SLOTS=${LSB_DJOB_NUMPROC:-16}
+
+stage() { echo; echo "=== stage $1   $(date)"; }
+
+echo "host $(hostname)  slots: ${LSB_MCPU_HOSTS:-unset}  started $(date)"
+
+# Fail in seconds, not hours in, if the environment or inputs are not right.
+python -c "import numpy, pandas, pyarrow, rdkit, scipy.optimize; scipy.optimize.milp" \
+    || { echo "ERROR: need numpy, pandas, pyarrow, rdkit and scipy>=1.9"; exit 1; }
+python -c "import sys; sys.path.insert(0, '$PIPELINE/stage1'); import fg_matrix; \
+print('accfg OK,', len(fg_matrix.build_afg(verbose=True).dict_fgs), 'FGs')"
+[ -f "$OUT/model_specs.csv" ] || { echo "ERROR: $OUT/model_specs.csv not found"; exit 1; }
+ls "$JSONL_DIR"/$GLOB >/dev/null 2>&1 || { echo "ERROR: no $GLOB in $JSONL_DIR"; exit 1; }
+
+# Stage 1 runs one worker process per slot (the scripts read the slots LSF granted), so
+# keep each worker's libraries single-threaded.
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+
+stage "1a: sample $TARGET molecules"
+python "$PIPELINE/stage1/extract_smiles.py" "$JSONL_DIR" -o "$SMILES_DIR" \
+       --glob "$GLOB" --target "$TARGET" --seed "$SEED" --resume
+
+stage "1b: FG matrix"
+python "$PIPELINE/stage1/fg_matrix.py" "$SMILES_DIR" -o "$FG_DIR" --batch 20000
+echo "stage-1 rejects: $(cat "$FG_DIR"/_rejects/*.txt 2>/dev/null | wc -l)"
+
+# Stages 2-5 are single processes; stage 3's matrix arithmetic can use every slot via BLAS.
+export OMP_NUM_THREADS=$SLOTS OPENBLAS_NUM_THREADS=$SLOTS MKL_NUM_THREADS=$SLOTS
+
+# Keep an earlier run's outputs instead of mixing them with this run's.
+if [ -n "$(find "$OUT" -maxdepth 1 -type f ! -name model_specs.csv -print -quit)" ]; then
+    prev=$OUT/previous_$(date +%Y%m%d_%H%M%S)
+    mkdir "$prev"
+    find "$OUT" -maxdepth 1 -type f ! -name model_specs.csv -exec mv {} "$prev"/ \;
+    echo "moved earlier outputs to $prev"
+fi
+
+stage "2: patterns"
+python "$PIPELINE/build_pattern_count_dictionary.py" --fg-dir "$FG_DIR"
+
+stage "3: clusters"
+python "$PIPELINE/build_pattern_clusters.py" --max-components "$MAX_COMPONENTS" \
+       --prune-threshold "$PRUNE_THRESHOLD" --seed "$SEED"
+
+stage "4: labels"
+python "$PIPELINE/label_clusters.py"
+
+stage "5: model assignment"
+set +e
+python "$PIPELINE/assign_clusters_to_models.py" --tolerance "$TOLERANCE"
+rc=$?
+set -e
+if [ "$rc" -eq 3 ]; then
+    echo
+    echo "Clusters too coarse for the coverage targets: see $OUT/assignment_warnings.txt."
+    echo "All outputs were written. Raise MAX_COMPONENTS above and resubmit; stage 1 resumes."
+fi
+
+echo "finished $(date)  (exit status $rc)"
+exit "$rc"
