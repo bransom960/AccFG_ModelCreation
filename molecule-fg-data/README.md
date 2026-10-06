@@ -194,6 +194,7 @@ Outputs:
 - `csv_outputs/model_assignments.csv`
 - `csv_outputs/model_coverage_report.csv`
 - `csv_outputs/pattern_cluster_model_map.csv`
+- `csv_outputs/model_molecule_counts.csv` — per model: unique molecules (distinct cids, a molecule in two of the model's clusters counted once), coverage, how many are in that model only vs shared with other models, and the clusters and patterns behind it; the last row, `ALL MODELS`, counts distinct molecules across every model
 
 Assignment rules:
 
