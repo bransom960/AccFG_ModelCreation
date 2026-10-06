@@ -24,6 +24,7 @@ SMILES_JSON = DATA_DIR / 'smiles.json'
 SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
 PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
 CLUSTER_OUTPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+CENTROID_OUTPUT = OUTPUT_DIR / 'cluster_centroids.csv'
 
 
 def load_smiles_list(dataset_path: Path):
@@ -69,6 +70,16 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
 
     canonical_df.to_csv(CLUSTER_OUTPUT, index=False)
 
+    # Each cluster's own centroid, keyed by cluster_id. label_clusters.py reads it from here:
+    # the per-row cluster_representative column holds the centroid of the row's PRIMARY
+    # cluster only, so it cannot label a cluster that a pattern joined as a secondary.
+    centroids = pd.DataFrame({
+        'cluster_id': list(range(len(weights))),
+        'mixing_weight': [round(float(w), 6) for w in weights],
+        'centroid': [''.join('1' if p >= 0.5 else '0' for p in m) for m in means],
+    })
+    centroids.to_csv(CENTROID_OUTPUT, index=False)
+
     fg_names = list(afg.dict_fgs.keys())
     primary_clusters = sorted(clustered['cluster_id'].unique())
     for cid in primary_clusters:
@@ -81,6 +92,7 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
 
     print(f'Wrote {len(pattern_df)} unique patterns to {PATTERN_OUTPUT}')
     print(f'Wrote {len(canonical_df)} clustered pattern rows to {CLUSTER_OUTPUT}')
+    print(f'Wrote {len(centroids)} cluster centroids to {CENTROID_OUTPUT}')
     print(canonical_df.head(10).to_string(index=False))
 
 
