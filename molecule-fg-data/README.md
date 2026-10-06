@@ -12,7 +12,7 @@ The pipeline is designed to work from raw SMILES input, process it with AccFG, a
 
 ## Folder structure
 
-- `smiles.json` — primary input file with the molecule SMILES list
+- `smiles.json` — primary input file with the molecules. Each entry should be an object `{"cid": 176000001, "smiles": "..."}` so the source ID is carried through every stage. A plain list of SMILES strings still works, but then `cid` is only the molecule's position in the file, and stage 1 prints a warning
 - `pubchem_like_sample_120.csv` — fallback sample dataset if `smiles.json` is missing
 - `build_sample_fg_dataset.py` — creates the FG presence table
 
