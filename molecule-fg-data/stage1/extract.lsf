@@ -1,0 +1,35 @@
+#!/bin/bash
+# Stage 1 on LSF: sample exactly TARGET molecules (salts and mixtures excluded) uniformly
+# across all processed_Compound_*.jsonl files.
+# Submit with:   bsub < extract.lsf          (the "<" is required -- see RUNBOOK.md)
+#
+# Reads every file twice (pass 1 counts eligible records, pass 2 writes the sample), so it is
+# I/O-bound: more cores help only until the filesystem saturates. 8 is plenty. Memory is
+# small (well under 200 MB per worker). Needs RDKit, to replace unparseable picks.
+
+#BSUB -J extract_smiles
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+#BSUB -W 1:00
+#BSUB -o extract_smiles.%J.log
+##BSUB -q your_queue_name           # uncomment and set if your site requires a queue
+
+set -euo pipefail
+
+# ---- edit these ---------------------------------------------------------------------
+SCRIPTS=$HOME/AccFG_ModelCreation/molecule-fg-data/stage1   # where extract_smiles.py lives
+JSONL_DIR=/path/to/jsonl                 # the 355 input files
+GLOB='processed_Compound_*.jsonl'        # which files in JSONL_DIR to sample from
+TARGET=500000                            # molecules to sample in total
+SMILES_DIR=/path/to/scratch/smiles       # output; scratch is usually better than $HOME
+# module load python/3.12                # or: source ~/miniforge3/bin/activate accfg
+# --------------------------------------------------------------------------------------
+
+echo "host $(hostname)  slots: ${LSB_MCPU_HOSTS:-unset}  started $(date)"
+
+# -j is omitted on purpose: the script reads the slots LSF granted (bsub -n).
+# Re-running with the same settings resumes: the counts are cached and finished shards kept.
+python "$SCRIPTS/extract_smiles.py" "$JSONL_DIR" -o "$SMILES_DIR" \
+       --glob "$GLOB" --target "$TARGET" --seed 0 --resume
+
+echo "finished $(date)"

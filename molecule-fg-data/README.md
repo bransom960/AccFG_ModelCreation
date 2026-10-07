@@ -12,7 +12,7 @@ The pipeline is designed to work from raw SMILES input, process it with AccFG, a
 
 ## Folder structure
 
-- `smiles.json` — primary input file with the molecule SMILES list
+- `smiles.json` — primary input file with the molecules. Each entry should be an object `{"cid": 176000001, "smiles": "..."}` so the source ID is carried through every stage. A plain list of SMILES strings still works, but then `cid` is only the molecule's position in the file, and stage 1 prints a warning
 - `pubchem_like_sample_120.csv` — fallback sample dataset if `smiles.json` is missing
 - `build_sample_fg_dataset.py` — creates the FG presence table
 
@@ -51,6 +51,7 @@ What it does:
 - runs AccFG against each SMILES string
 - converts each molecule into a binary vector of functional-group presence/absence
 - writes a molecule-by-FG table
+- drops salts and mixtures (any SMILES containing `.`) and lists them, with their cid, in `csv_outputs/rejected_molecules.csv`; stages 2 and 3 drop the same molecules
 
 Output:
 
@@ -72,14 +73,19 @@ Script:
 
 What it does:
 
-- takes the molecule FG vectors
+- reads the FG matrix stage 1 already computed — `csv_outputs/fg_presence.csv`, or with `--fg-dir` the Parquet output of `stage1/fg_matrix.py` — so AccFG is not run again
 - converts each molecule into a binary FG pattern string
 - groups molecules that share the exact same pattern
 - counts how many molecules are in each pattern
 
-Output:
+Outputs:
 
 - `csv_outputs/pubchem_like_pattern_counts.csv`
+- `csv_outputs/molecule_patterns.csv` — `cid, pattern_index`, one row per molecule
+- `csv_outputs/fg_columns.json` — FG names in pattern-bit order
+- `csv_outputs/molecule_status.csv` — `cid, status, detail` for every input molecule: `clustered`, `rejected_no_fg`, or the stage-1 reason it was dropped (`rejected_salt_or_mixture`, `rejected_unparseable`, `rejected_accfg_error`)
+
+Stages 3 and 4 read these files instead of `smiles.json`, so every stage works from the same molecules and the same `pattern_index`.
 
 This step matters because many molecules often share the same FG pattern. Counting patterns reduces the dataset size and makes clustering more interpretable.
 
@@ -105,23 +111,17 @@ What it does:
 
 Important detail about the Bernoulli model:
 
-- the algorithm does not force a fixed cluster count
+- `--max-components` (default 12; `--k` is an alias) is an upper bound on the number of clusters, not a forced count
 - it fits a Bernoulli mixture to the binary FG data using EM
 - each cluster has a vector of FG probabilities, where values near 1 mean “this FG is very likely in the cluster”
-- weak components are pruned automatically using a small threshold
+- weak components are pruned automatically: a component whose mixing weight ends at or below `--prune-threshold` (default `0.001`, i.e. 0.1% of molecules), or that no pattern belongs to, is dropped and the remaining components are re-fitted; each drop is printed
 - the final cluster count is therefore discovered from the data, not hard-coded by the command
 
-Why `--k 4` still appears in the command:
+What "discovered from the data" does and does not mean:
 
-- `--k` is acting as an upper bound or candidate limit for the search, not a forced answer
-- it tells the model: “do not consider more than 4 cluster components in this run”
-- the Bernoulli mixture still decides whether 1, 2, 3, or 4 clusters are actually needed
-- if the data supports only 3 clusters, the model drops the weak fourth component and reports `Discovered K = 3`
-
-This is the key distinction:
-
-- `--k 4` means “maximum components allowed”
-- the Bernoulli mixture determines the final cluster count automatically
+- a component is removed only when its mixing weight ends below the prune threshold; no model-selection criterion (such as BIC) compares different cluster counts
+- so with plenty of molecules you will usually get `--max-components` clusters back, and the count you see reflects that bound and the prune threshold rather than a statistical test
+- `Discovered K` in the log reports how many components survived pruning
 
 Output:
 
@@ -179,43 +179,37 @@ Script:
 
 What it does:
 
-- reads the cluster summary
-- reads the model rules from `model_specs.csv`
-- chooses clusters that match each model’s FG-count and target-coverage constraints
-- applies a reuse decay so the same cluster cannot be counted fully by every model
-- writes assignment rows indicating which cluster belongs to which model
+- reads the cluster summary, the per-pattern cluster memberships (`pattern_clusters.csv`) and the model targets (`model_specs.csv`)
+- assigns whole clusters to models so that every model's coverage is as close as possible to its target
+- writes one row per (model, cluster), a per-model coverage report, and the pattern → cluster → model lineage map
 
 Inputs:
 
 - `csv_outputs/cluster_summary.csv`
+- `csv_outputs/pattern_clusters.csv`
 - `csv_outputs/model_specs.csv`
 
 Outputs:
 
 - `csv_outputs/model_assignments.csv`
 - `csv_outputs/model_coverage_report.csv`
+- `csv_outputs/pattern_cluster_model_map.csv`
+- `csv_outputs/model_molecule_counts.csv` — per model: unique molecules (distinct cids, a molecule in two of the model's clusters counted once), coverage, how many are in that model only vs shared with other models, and the clusters and patterns behind it; the last row, `ALL MODELS`, counts distinct molecules across every model
 
-Model assignment logic:
+Assignment rules:
 
-- target coverage is expressed as a share of total cluster mass
-- clusters are ranked by effective contribution
-- a cluster reused by another model gets discounted via a reuse factor
-- each model tries to reach its desired coverage without overusing the same cluster
+1. every cluster is assigned to at least one model
+2. clusters are assigned whole; a model never takes part of a cluster
+3. a cluster may be assigned to several models (the targets may sum to more than 100%, in which case some clusters must be)
+4. a model's coverage is the share of **unique clustered molecules** in its clusters; a molecule in two clusters of the same model counts once
+5. every model keeps at least `--min-exclusive` (default `0.01`, i.e. 1%) of the clustered molecules that no other model covers; a `min_exclusive` column in `model_specs.csv` sets it per model, and `0` turns the rule off
+6. subject to 1–5, the total distance from the targets, sum over models of |coverage − target|, is minimised
 
-Important assignment rule:
+The minimisation is exact: a small integer program solved with `scipy.optimize.milp` (scipy ≥ 1.9). Because clusters are whole, a model can end above or below its target; `coverage_gap` in the report (target − coverage) shows by how much, and models that received no cluster are listed with coverage 0.
 
-- every discovered cluster must still be assigned at least once
-- this is enforced even when a cluster sits outside the min/max FG windows for all models
-- in that case, the cluster is assigned to the closest compatible model by FG-count distance
-- however, the fallback assignment is capped so it cannot push a model above its target coverage
-- if a model has no remaining target budget, the cluster is not allowed to exceed the remaining allocation for that model
+If no assignment can give every model its exclusive share, stage 5 writes `assignment_warnings.txt` and exits with status **3** as well. Exclusive molecules need clusters that only one model takes, so more clusters (a larger `--max-components`) make the rule easier to meet.
 
-This means the pipeline enforces two constraints at the same time:
-
-1. every cluster gets used at least once
-2. no model exceeds its assigned domain coverage target
-
-This is the key difference between a simple “closest model” fallback and a valid domain assignment policy.
+If any model ends more than `--tolerance` (default `0.02`, i.e. ±2 percentage points) from its target, the clusters are too coarse for the targets. All outputs are still written, but the script then prints a message naming each model that misses and the cluster sizes, saying to re-run `build_pattern_clusters.py` with a larger `--max-components`, saves it to `csv_outputs/assignment_warnings.txt`, and exits with status **3**. `within_tolerance` in the report shows which models pass.
 
 ## The model rule file
 
@@ -223,14 +217,11 @@ The model rules live in:
 
 - `csv_outputs/model_specs.csv`
 
-The file contains model definitions such as:
+The file contains one row per model:
 
-- model name
-- target coverage
-- min allowed FG count
-- max allowed FG count
-
-This is how the pipeline decides whether a certain cluster fits a model type.
+- `model_name`
+- `target_coverage` — the fraction of clustered molecules the model should cover
+- `min_fgs` / `max_fgs` — optional, and ignored by the assignment
 
 Important modeling note:
 
@@ -238,10 +229,7 @@ Important modeling note:
 - in the current full pipeline (`lite=False`), the runtime FG vocabulary is larger because heterocycle features are added on top of that common list
 - in this repo, the active full-mode vocabulary is therefore 534 functional-group features, not 504
 - those vocabulary entries are not a separate rule set for each model
-- instead, each model defines a complexity window for the cluster centroids it is allowed to consider
-- a cluster is only eligible for a model if its centroid FG count falls within that model’s min/max FG range
-
-So the full FG list defines what features exist, while the model spec file defines which complexity bands each model is allowed to cover.
+- `model_specs.csv` needs `model_name` and `target_coverage` (a fraction of clustered molecules); `min_fgs` / `max_fgs` may be present but are ignored, so any cluster may go to any model
 
 ## Typical run order
 
@@ -250,12 +238,32 @@ From the project root, the intended order is:
 ```bash
 python3 "molecule-fg-data/build_sample_fg_dataset.py"
 python3 "molecule-fg-data/build_pattern_count_dictionary.py"
-python3 "molecule-fg-data/build_pattern_clusters.py" --k 4 --seed 0
+python3 "molecule-fg-data/build_pattern_clusters.py" --max-components 12 --seed 0
 python3 "molecule-fg-data/label_clusters.py"
 python3 "molecule-fg-data/assign_clusters_to_models.py"
 ```
 
 That produces the full pipeline result.
+
+On an LSF cluster, `cluster.lsf` runs stages 2–5 as one job (edit the paths block at the top first):
+
+```bash
+bsub < molecule-fg-data/cluster.lsf
+```
+
+To run **everything as one job**, stage 1 included (sample 500,000 molecules from the
+`processed_Compound_*.jsonl` files → FG matrix → patterns → clusters → labels → models), use
+`pipeline.lsf` instead. Edit its paths block first:
+
+```bash
+bsub < molecule-fg-data/pipeline.lsf
+```
+
+It stops at the first stage that fails. Stages 3–5 are tried with each cluster count in
+`MAX_COMPONENTS_TRY` (default `12 16 24 32 48`), smallest first, and the first clustering whose
+model assignment meets every rule (coverage within `TOLERANCE`, `MIN_EXCLUSIVE` molecules of
+its own for every model) is kept. If none does, the job exits with status 3; add larger values
+and resubmit. Stage 1 resumes from its finished outputs, so only stages 2–5 run again.
 
 ## If `smiles.json` is missing
 

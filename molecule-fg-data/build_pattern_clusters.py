@@ -1,49 +1,43 @@
+"""Stage 3: overlapping Bernoulli-mixture clusters of the unique FG patterns.
+
+Reads stage 2's outputs (pubchem_like_pattern_counts.csv, molecule_patterns.csv and
+fg_columns.json); AccFG is not run again.
+"""
+from __future__ import annotations
+
 from pathlib import Path
 import json
-import sys
 
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from accfg import AccFG
-from patterns import pattern_count_dataframe
 from bernoulli_mixture_clustering import cluster_pattern_counts_overlapping, describe_clusters
 
-ROOT = PROJECT_ROOT
+ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / 'molecule-fg-data'
 OUTPUT_DIR = DATA_DIR / 'csv_outputs'
 OUTPUT_DIR.mkdir(exist_ok=True)
+PRUNE_THRESHOLD = 1e-3  # default for --prune-threshold; see bernoulli_mixture_em
 
-FG_PRESENCE = OUTPUT_DIR / 'fg_presence.csv'
-SMILES_JSON = DATA_DIR / 'smiles.json'
-SAMPLE_DATASET = DATA_DIR / 'pubchem_like_sample_120.csv'
 PATTERN_OUTPUT = OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'
+MOLECULE_PATTERNS = OUTPUT_DIR / 'molecule_patterns.csv'
+FG_COLUMNS = OUTPUT_DIR / 'fg_columns.json'
 CLUSTER_OUTPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+CENTROID_OUTPUT = OUTPUT_DIR / 'cluster_centroids.csv'
 
 
-def load_smiles_list(dataset_path: Path):
-    if dataset_path.suffix.lower() == '.json':
-        payload = json.loads(dataset_path.read_text())
-        if isinstance(payload, list):
-            return [str(s).strip() for s in payload if str(s).strip()]
-        if isinstance(payload, dict) and 'smiles' in payload and isinstance(payload['smiles'], list):
-            return [str(s).strip() for s in payload['smiles'] if str(s).strip()]
-        raise ValueError(f'Unsupported JSON structure in {dataset_path}')
-
-    dataset = pd.read_csv(dataset_path)
-    return dataset['smiles'].astype(str).tolist()
+def member_cids_by_pattern(molecule_patterns: pd.DataFrame) -> pd.Series:
+    """pattern_index -> comma-separated cids of the molecules with that pattern."""
+    return (molecule_patterns.groupby('pattern_index', sort=False)['cid']
+            .agg(lambda s: ','.join(sorted(pd.unique(s.astype(str)), key=lambda c: (len(c), c))))
+            .rename('member_cids'))
 
 
 def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed: int = 0):
-    source_path = SMILES_JSON if SMILES_JSON.exists() else SAMPLE_DATASET
-    afg = AccFG(print_load_info=False, lite=False)
-    smiles_list = load_smiles_list(source_path)
-
-    pattern_df = pattern_count_dataframe(afg, smiles_list, canonical=True)
-    pattern_df.to_csv(PATTERN_OUTPUT, index=False)
+    for path in (PATTERN_OUTPUT, MOLECULE_PATTERNS, FG_COLUMNS):
+        if not path.exists():
+            raise SystemExit(f'{path} not found: run build_pattern_count_dictionary.py first')
+    pattern_df = pd.read_csv(PATTERN_OUTPUT, dtype={'pattern': str})
+    fg_names = json.loads(FG_COLUMNS.read_text())
 
     clustered, means, weights = cluster_pattern_counts_overlapping(
         pattern_df,
@@ -52,22 +46,26 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
         top_n=top_n,
         seed=seed,
         verbose=True,
+        prune_threshold=PRUNE_THRESHOLD,
     )
 
     canonical_df = clustered.copy().sort_values(['cluster_id', 'pattern_index']).reset_index(drop=True)
-    if FG_PRESENCE.exists():
-        fg_presence = pd.read_csv(FG_PRESENCE)
-        if {'cid', 'pattern_index'}.issubset(fg_presence.columns):
-            pattern_cids = (
-                fg_presence.groupby('pattern_index', sort=False)['cid']
-                .agg(lambda s: ','.join(str(int(x)) for x in sorted(pd.unique(s))))
-                .rename('member_cids')
-            )
-            canonical_df['member_cids'] = canonical_df['pattern_index'].map(pattern_cids)
+    molecule_patterns = pd.read_csv(MOLECULE_PATTERNS, dtype={'cid': str})
+    canonical_df['member_cids'] = canonical_df['pattern_index'].map(
+        member_cids_by_pattern(molecule_patterns))
 
     canonical_df.to_csv(CLUSTER_OUTPUT, index=False)
 
-    fg_names = list(afg.dict_fgs.keys())
+    # Each cluster's own centroid, keyed by cluster_id. label_clusters.py reads it from here:
+    # the per-row cluster_representative column holds the centroid of the row's PRIMARY
+    # cluster only, so it cannot label a cluster that a pattern joined as a secondary.
+    centroids = pd.DataFrame({
+        'cluster_id': list(range(len(weights))),
+        'mixing_weight': [round(float(w), 6) for w in weights],
+        'centroid': [''.join('1' if p >= 0.5 else '0' for p in m) for m in means],
+    })
+    centroids.to_csv(CENTROID_OUTPUT, index=False)
+
     primary_clusters = sorted(clustered['cluster_id'].unique())
     for cid in primary_clusters:
         rep = clustered[clustered['cluster_id'] == cid]['cluster_representative'].iloc[0]
@@ -77,8 +75,9 @@ def main(max_components: int = 12, tau: float = 0.3, top_n: int | None = 2, seed
 
     describe_clusters(means, weights, fg_names, top_k=8)
 
-    print(f'Wrote {len(pattern_df)} unique patterns to {PATTERN_OUTPUT}')
+    print(f'Clustered {len(pattern_df)} unique patterns from {PATTERN_OUTPUT}')
     print(f'Wrote {len(canonical_df)} clustered pattern rows to {CLUSTER_OUTPUT}')
+    print(f'Wrote {len(centroids)} cluster centroids to {CENTROID_OUTPUT}')
     print(canonical_df.head(10).to_string(index=False))
 
 
@@ -92,7 +91,12 @@ if __name__ == '__main__':
     parser.add_argument('--top-n', type=int, default=2, help='Maximum number of clusters a pattern can join.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed for deterministic initialization.')
     parser.add_argument('--k', type=int, default=None, help='Deprecated alias for max-components.')
+    parser.add_argument('--prune-threshold', type=float, default=PRUNE_THRESHOLD,
+                        help='Drop components whose mixing weight ends at or below this fraction of '
+                             'molecules (default 0.001), then re-fit the rest. Lower it if a larger '
+                             '--max-components does not produce more clusters.')
     args = parser.parse_args()
+    PRUNE_THRESHOLD = args.prune_threshold
 
     if args.k is not None:
         max_components = args.k

@@ -1,4 +1,0 @@
-model_name,cluster_id,cluster_weight,effective_weight,centroid_fgs,centroid_n_fgs,was_reused,forced_assignment,target_coverage
-Small Transformer-Finetuned,0,2929,2630.55,"oxy,ether,amine,carbonyl,hetero N nonbasic,benzene",6,False,False,0.65
-Large Transformer-Statistical,1,1118,1118.0,"oxy,ether,amine,carbonyl,hetero N nonbasic,benzene",6,False,False,0.55
-Large Statistical,1,1118,559.0,"oxy,ether,amine,carbonyl,hetero N nonbasic,benzene",6,True,False,0.3
