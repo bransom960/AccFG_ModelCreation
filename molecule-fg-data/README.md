@@ -235,7 +235,7 @@ Inputs:
 - `csv_outputs/molecule_patterns.csv`
 - `csv_outputs/pattern_clusters.csv`
 - `csv_outputs/pattern_cluster_model_map.csv`
-- `csv_outputs/model_specs.csv` — needs `avg_error_in`; `std_error_in` is optional (`--std`, default 0.05)
+- `csv_outputs/model_specs.csv` — needs `avg_error_in`; `std_error_in` is optional (`--std`, default 0.05). A model whose `avg_error_in` is blank (e.g. `LookUp`) gets no distribution and no rows in the error tables; its clusters can still be in the model map
 
 Outputs:
 
@@ -271,7 +271,7 @@ The file contains one row per model:
 - `model_name`
 - `target_coverage` — the fraction of clustered molecules the model should cover
 - `min_fgs` / `max_fgs` — optional, and ignored by the assignment
-- `avg_error_in` — the model's average in-domain error (stage 6)
+- `avg_error_in` — the model's average in-domain error (stage 6); leave it blank for a model that should get no error distribution
 - `std_error_in` — optional std of both error distributions (stage 6; default 0.05)
 
 Important modeling note:

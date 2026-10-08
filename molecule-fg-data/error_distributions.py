@@ -68,7 +68,9 @@ def _rank_positions(order: np.ndarray, counts: np.ndarray, n_patterns: int):
     return u, z
 
 
-def load_model_specs(model_specs_path: str | Path, default_std: float) -> pd.DataFrame:
+def load_model_specs(model_specs_path: str | Path, default_std: float):
+    """Return (specs, skipped): the models that get distributions, and the names of those
+    whose avg_error_in is blank (e.g. a lookup model), which get no distribution and no rows."""
     specs = pd.read_csv(model_specs_path)
     if not {'model_name', 'avg_error_in'}.issubset(specs.columns):
         raise ValueError('model_specs.csv must include model_name and avg_error_in columns')
@@ -76,16 +78,28 @@ def load_model_specs(model_specs_path: str | Path, default_std: float) -> pd.Dat
         raise ValueError('model_specs.csv has duplicate model_name rows')
     specs = specs.copy()
     specs['model_name'] = specs['model_name'].astype(str).str.strip()
+    # Blank (or whitespace-only) means no distribution; anything else must be a number.
+    avg = specs['avg_error_in']
+    if avg.dtype == object:
+        avg = avg.astype(str).str.strip().replace({'': np.nan, 'nan': np.nan})
+    specs['avg_error_in'] = pd.to_numeric(avg)
+    blank = specs['avg_error_in'].isna()
+    skipped = specs.loc[blank, 'model_name'].tolist()
+    if skipped:
+        print(f'No avg_error_in, so no error distribution for: {skipped}')
+    specs = specs.loc[~blank].reset_index(drop=True)
+    if specs.empty:
+        raise ValueError('model_specs.csv has no model with an avg_error_in')
     if 'std_error_in' not in specs.columns:
         specs['std_error_in'] = default_std
     specs['std_error_in'] = specs['std_error_in'].fillna(default_std)
     if 'std_error_out' not in specs.columns:
         specs['std_error_out'] = specs['std_error_in']
     specs['std_error_out'] = specs['std_error_out'].fillna(specs['std_error_in'])
-    if specs['avg_error_in'].isna().any() or (specs[['std_error_in', 'std_error_out']] <= 0).any().any():
-        raise ValueError('model_specs.csv needs an avg_error_in for every model and positive std values')
+    if (specs[['std_error_in', 'std_error_out']] <= 0).any().any():
+        raise ValueError('model_specs.csv needs positive std values')
     specs['avg_error_out'] = specs['avg_error_in'] + OUT_OF_DOMAIN_SHIFT_STDS * specs['std_error_in']
-    return specs
+    return specs, skipped
 
 
 def load_patterns(pattern_counts_path: str | Path):
@@ -115,8 +129,9 @@ def load_patterns(pattern_counts_path: str | Path):
     return pattern_ids[has_fg], bits[has_fg], counts[has_fg], pattern_ids[~has_fg]
 
 
-def load_domains(pattern_model_map_path: str | Path, pattern_clusters: pd.DataFrame, model_names: list[str]):
-    """Return {model_name: set of in-domain pattern_index}."""
+def load_domains(pattern_model_map_path: str | Path, pattern_clusters: pd.DataFrame, model_names: list[str],
+                 skipped: list[str] = ()):
+    """Return {model_name: set of in-domain pattern_index}. Models in `skipped` are dropped quietly."""
     pattern_model_map = pd.read_csv(pattern_model_map_path)
     if 'model_name' not in pattern_model_map.columns:
         raise ValueError('pattern_cluster_model_map.csv must include a model_name column')
@@ -132,7 +147,7 @@ def load_domains(pattern_model_map_path: str | Path, pattern_clusters: pd.DataFr
         model_name: set(group['pattern_index'].astype(np.int64).tolist())
         for model_name, group in pattern_model_map.groupby('model_name')
     }
-    unknown = sorted(set(domains) - set(model_names))
+    unknown = sorted(set(domains) - set(model_names) - set(skipped))
     if unknown:
         print(f'WARNING: models in the pattern-model map but not in model_specs.csv (ignored): {unknown}')
     for model_name in model_names:
@@ -285,10 +300,10 @@ def build_model_error_table(
     if min(cluster_weight, fg_weight) < 0.0 or cluster_weight + fg_weight > 1.0 or not 0.0 <= jitter < 1.0:
         raise ValueError('cluster_weight and fg_weight must be >= 0 and sum to at most 1, and jitter in [0, 1)')
 
-    specs = load_model_specs(model_specs_path, default_std)
+    specs, skipped = load_model_specs(model_specs_path, default_std)
     model_names = specs['model_name'].tolist()
     pattern_clusters = pd.read_csv(pattern_clusters_path) if Path(pattern_clusters_path).exists() else pd.DataFrame()
-    domains = load_domains(pattern_model_map_path, pattern_clusters, model_names)
+    domains = load_domains(pattern_model_map_path, pattern_clusters, model_names, skipped)
 
     cluster_of_pattern = {}
     if {'pattern_index', 'cluster_id'}.issubset(pattern_clusters.columns):
