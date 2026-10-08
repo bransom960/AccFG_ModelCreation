@@ -18,9 +18,14 @@ decided per FG pattern, so molecules with the same FGs come from the same range:
 The rank is molecule-weighted and mapped through the normal quantile function, so each
 distribution keeps its normal shape. A small per-molecule jitter is added on top.
 
-Works per unique FG pattern: fg_presence.csv is streamed twice, once to collect the unique
-FG vectors and once to write one error per (molecule, model), so the input never has to
-fit in memory and nearest-neighbour distances are computed once per pattern.
+Reads stage 2's outputs (build_pattern_count_dictionary.py), so it works the same whether
+stage 1 wrote fg_presence.csv or fg_matrix.py Parquet:
+
+  pubchem_like_pattern_counts.csv   pattern_index, pattern, count   the unique FG vectors
+  molecule_patterns.csv             cid, pattern_index              streamed, one row per molecule
+
+Molecules with no FGs (stage 2's `rejected_no_fg`) are left out, as they are from clustering.
+Nearest-neighbour distances are computed once per unique pattern.
 """
 from __future__ import annotations
 
@@ -35,9 +40,6 @@ import pandas as pd
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = DEFAULT_ROOT / 'molecule-fg-data'
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / 'csv_outputs'
-
-# Columns of fg_presence.csv that are not FG flags.
-METADATA_COLUMNS = {'cid', 'Molecule', 'molecule', 'smiles', 'SMILES', 'pattern', 'pattern_index'}
 
 OUT_OF_DOMAIN_SHIFT_STDS = 3.0
 
@@ -84,45 +86,31 @@ def load_model_specs(model_specs_path: str | Path, default_std: float) -> pd.Dat
     return specs
 
 
-def load_patterns(fg_presence_path: str | Path, chunksize: int):
-    """Read the unique FG vectors and their molecule counts from fg_presence.csv.
+def load_patterns(pattern_counts_path: str | Path):
+    """Read the unique FG vectors and their molecule counts from stage 2.
 
-    Streams the file so it never has to fit in memory. A pattern is identified by
-    pattern_index; FG values > 0 count as present.
+    Returns (pattern_ids, bits, counts, no_fg_ids). Patterns with no FG are returned
+    separately in no_fg_ids and left out of the rest.
     """
-    header = pd.read_csv(fg_presence_path, nrows=0).columns
-    if not {'cid', 'pattern_index'}.issubset(header):
-        raise ValueError('fg_presence.csv must include cid and pattern_index columns')
-    fg_columns = [col for col in header if col not in METADATA_COLUMNS]
-    if not fg_columns:
-        raise ValueError('fg_presence.csv has no FG columns')
+    patterns = pd.read_csv(pattern_counts_path, dtype={'pattern': str})
+    if not {'pattern_index', 'pattern', 'count'}.issubset(patterns.columns):
+        raise ValueError(f'{pattern_counts_path} must include pattern_index, pattern and count columns')
+    if patterns['pattern_index'].duplicated().any():
+        raise ValueError(f'{pattern_counts_path} lists a pattern_index twice')
+    lengths = patterns['pattern'].str.len()
+    if lengths.nunique() != 1:
+        raise ValueError(f'{pattern_counts_path}: patterns have different lengths {sorted(lengths.unique())}')
 
-    bits_by_index: dict[int, np.ndarray] = {}
-    counts_by_index: dict[int, int] = {}
-    reader = pd.read_csv(
-        fg_presence_path,
-        usecols=['pattern_index'] + fg_columns,
-        dtype={col: np.float32 for col in fg_columns},
-        chunksize=chunksize,
-    )
-    for chunk in reader:
-        indices, counts = np.unique(chunk['pattern_index'].to_numpy(dtype=np.int64), return_counts=True)
-        for pattern_index, count in zip(indices.tolist(), counts.tolist()):
-            counts_by_index[pattern_index] = counts_by_index.get(pattern_index, 0) + count
-
-        first_rows = chunk.drop_duplicates('pattern_index')
-        first_bits = (first_rows[fg_columns].to_numpy() > 0).astype(np.uint8)
-        for pattern_index, bits in zip(first_rows['pattern_index'].astype(np.int64).tolist(), first_bits):
-            known = bits_by_index.get(pattern_index)
-            if known is None:
-                bits_by_index[pattern_index] = bits
-            elif not np.array_equal(known, bits):
-                raise ValueError(f'pattern_index {pattern_index} appears with two different FG vectors')
-
-    pattern_ids = np.array(sorted(bits_by_index), dtype=np.int64)
-    bits = np.stack([bits_by_index[i] for i in pattern_ids.tolist()])
-    counts = np.array([counts_by_index[i] for i in pattern_ids.tolist()], dtype=np.int64)
-    return pattern_ids, bits, counts, fg_columns
+    patterns = patterns.sort_values('pattern_index')
+    n_fgs = int(lengths.iloc[0])
+    bits = (np.frombuffer(''.join(patterns['pattern']).encode('ascii'), dtype=np.uint8)
+            .reshape(len(patterns), n_fgs) - ord('0'))
+    if bits.max() > 1:
+        raise ValueError(f'{pattern_counts_path}: patterns must be 0/1 strings')
+    has_fg = bits.any(axis=1)
+    pattern_ids = patterns['pattern_index'].to_numpy(dtype=np.int64)
+    counts = patterns['count'].to_numpy(dtype=np.int64)
+    return pattern_ids[has_fg], bits[has_fg], counts[has_fg], pattern_ids[~has_fg]
 
 
 def load_domains(pattern_model_map_path: str | Path, pattern_clusters: pd.DataFrame, model_names: list[str]):
@@ -253,7 +241,8 @@ def build_pattern_positions(
 
 
 def build_model_error_table(
-    fg_presence_path: str | Path = DEFAULT_OUTPUT_DIR / 'fg_presence.csv',
+    pattern_counts_path: str | Path = DEFAULT_OUTPUT_DIR / 'pubchem_like_pattern_counts.csv',
+    molecule_patterns_path: str | Path = DEFAULT_OUTPUT_DIR / 'molecule_patterns.csv',
     model_specs_path: str | Path = DEFAULT_OUTPUT_DIR / 'model_specs.csv',
     pattern_clusters_path: str | Path = DEFAULT_OUTPUT_DIR / 'pattern_clusters.csv',
     pattern_model_map_path: str | Path = DEFAULT_OUTPUT_DIR / 'pattern_cluster_model_map.csv',
@@ -287,8 +276,9 @@ def build_model_error_table(
         first = pattern_clusters.drop_duplicates('pattern_index')
         cluster_of_pattern = dict(zip(first['pattern_index'].astype(np.int64), first['cluster_id'].astype(np.int64)))
 
-    pattern_ids, bits, counts, fg_columns = load_patterns(fg_presence_path, chunksize)
-    print(f'{counts.sum()} molecules, {len(pattern_ids)} unique FG patterns, {len(fg_columns)} FGs')
+    pattern_ids, bits, counts, no_fg_ids = load_patterns(pattern_counts_path)
+    print(f'{counts.sum()} molecules, {len(pattern_ids)} unique FG patterns, {bits.shape[1]} FGs'
+          f' ({len(no_fg_ids)} no-FG pattern(s) left out)')
 
     seeds = np.random.SeedSequence(seed).spawn(2 * len(specs))
     pattern_rngs = [np.random.default_rng(s) for s in seeds[0::2]]
@@ -317,9 +307,15 @@ def build_model_error_table(
     ]
     pd.DataFrame(columns=columns).to_csv(output_path, index=False)
 
-    reader = pd.read_csv(fg_presence_path, usecols=['cid', 'pattern_index'], dtype={'cid': str}, chunksize=chunksize)
+    reader = pd.read_csv(molecule_patterns_path, usecols=['cid', 'pattern_index'], dtype={'cid': str}, chunksize=chunksize)
     for chunk in reader:
-        positions = np.searchsorted(pattern_ids, chunk['pattern_index'].to_numpy(dtype=np.int64))
+        chunk = chunk[~chunk['pattern_index'].isin(no_fg_ids)]
+        if chunk.empty:
+            continue
+        chunk_ids = chunk['pattern_index'].to_numpy(dtype=np.int64)
+        positions = np.minimum(np.searchsorted(pattern_ids, chunk_ids), len(pattern_ids) - 1)
+        if not np.array_equal(pattern_ids[positions], chunk_ids):
+            raise ValueError(f'{molecule_patterns_path} has pattern_index values missing from {pattern_counts_path}')
         for model_name, rng in zip(model_names, molecule_rngs):
             p = per_model[model_name]
             domain = p['domain_flag'].to_numpy()[positions]
@@ -368,7 +364,8 @@ def build_model_error_table(
 
 def main():
     parser = argparse.ArgumentParser(description='Build a molecule-model error table from FG patterns and model coverage rules.')
-    parser.add_argument('--fg-presence', type=str, default=str(DEFAULT_OUTPUT_DIR / 'fg_presence.csv'))
+    parser.add_argument('--pattern-counts', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pubchem_like_pattern_counts.csv'))
+    parser.add_argument('--molecule-patterns', type=str, default=str(DEFAULT_OUTPUT_DIR / 'molecule_patterns.csv'))
     parser.add_argument('--model-specs', type=str, default=str(DEFAULT_OUTPUT_DIR / 'model_specs.csv'))
     parser.add_argument('--pattern-clusters', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_clusters.csv'))
     parser.add_argument('--pattern-model-map', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_cluster_model_map.csv'))
@@ -384,7 +381,8 @@ def main():
     args = parser.parse_args()
 
     summary = build_model_error_table(
-        fg_presence_path=args.fg_presence,
+        pattern_counts_path=args.pattern_counts,
+        molecule_patterns_path=args.molecule_patterns,
         model_specs_path=args.model_specs,
         pattern_clusters_path=args.pattern_clusters,
         pattern_model_map_path=args.pattern_model_map,
