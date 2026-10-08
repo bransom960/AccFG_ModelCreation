@@ -245,12 +245,15 @@ Outputs:
 
 `plot_error_distributions.py` reads `molecule_model_error_table.csv` and writes to `csv_outputs/figures/`:
 
-- `error_points.png` — one panel per model, all on the same axes: x = molecules grouped by FG cluster then pattern (the same order in every panel), y = sampled error, one dot per molecule
-- `error_points_<model>.png` — each panel on its own, on the same axes
-- `error_histograms.png` — one histogram per model, same bins and axes, stacked by cluster
+- `error_points.png` — one row per model with in-domain and out-of-domain side by side, every panel on the same y axis (the sampled error itself, not centred): x = that panel's molecules grouped by FG cluster then pattern, one dot per molecule
+- `error_points_<model>.png` — one model's two panels on their own, on the same axes
+- `error_cluster_boxes.png` — per model and domain, one box per cluster (25–75%, whiskers 5–95%), to see whether the FG bunches sit in different ranges
+- `error_histograms.png` — per model and domain, same bins, stacked by cluster
 - `error_plot_summary.csv` — n, mean, std, min, max of the error per model, cluster and domain
 
-A molecule's colour is its pattern's primary cluster (`pattern_clusters.csv`); the `--top-groups` largest clusters (default 7, the most colours that stay distinguishable) get their own colour and the rest are grey "Other". The legend names each cluster's common FGs from `cluster_summary.csv`. Dashed and dotted lines mark the in-domain and out-of-domain means. `--max-points N` plots N molecules per model (the same ones in every panel) when every point is too slow; the histograms and the summary always use all of them.
+A molecule's colour is its pattern's primary cluster (`pattern_clusters.csv`); the `--top-groups` largest clusters (default 7, the most colours that stay distinguishable) get their own colour and the rest are grey "Other". The legend names each cluster's common FGs from `cluster_summary.csv`. A dashed line marks each domain's mean. A panel says so when a model has no molecules in that domain. `--max-points N` plots N molecules per model (the same ones in every panel) when every point is too slow; the boxes, histograms and summary always use all of them.
+
+The script first prints each model's in-domain and out-of-domain counts, and warns when a model has no out-of-domain molecules or when `error_mean` is 0 everywhere (a table made without `avg_error_in`, as the original `error_distributions.py` did).
 
 ```bash
 python3 "molecule-fg-data/plot_error_distributions.py"
