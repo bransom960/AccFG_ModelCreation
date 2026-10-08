@@ -223,8 +223,9 @@ What it does:
 
 - gives every model two normal error distributions: in-domain, centred on `avg_error_in` with std `std_error_in`, and out-of-domain, centred 3 std higher (`avg_error_in + 3 * std_error_in`)
 - a molecule is in-domain for a model when its pattern is in one of the model's clusters (`pattern_cluster_model_map.csv`)
-- in-domain: molecules with the same FGs land in the same range of the distribution, and molecules with similar FGs land close together (`--fg-weight`, default 0.8, sets how strongly)
-- out-of-domain: patterns are ranked by their minimum Hamming distance to the model's in-domain patterns; the closest take the low end of the out-of-domain distribution
+- each FG cluster (a pattern's primary cluster) gets its own part of each model's distribution (`--cluster-weight`, default 0.6), molecules with similar FGs land close together (`--fg-weight`, default 0.3), and the rest is per-pattern noise, so molecules with the same FGs land in the same range but not on the same value
+- in-domain: patterns are ranked by that score
+- out-of-domain: patterns are ranked by their minimum Hamming distance to the model's in-domain patterns; the closest take the low end of the out-of-domain distribution (the score breaks ties, so clusters still separate at each distance)
 - each molecule adds a small jitter of its own (`--jitter`, default 0.2 std); errors below 0 are clipped (`--no-clip` keeps them)
 - prints the target vs sampled mean and std for every model and domain
 
