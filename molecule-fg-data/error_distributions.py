@@ -1,13 +1,18 @@
 """Build the molecule-by-model ground-truth error table.
 
+Every model has an in-domain and an out-of-domain normal distribution:
+
+- in-domain:     mean = avg_error_in,                    std = std_error_in
+- out-of-domain: mean = avg_error_in + 3 * std_error_in, std = std_error_out (defaults to std_error_in)
+
 Works per unique FG pattern: fg_presence.csv is streamed twice, once to collect the unique
 FG vectors and once to write one error per (molecule, model), so the input never has to
 fit in memory and nearest-neighbour distances are computed once per pattern.
 
-- in-domain molecules sample from N(avg_error_in, std_error_in)
+- in-domain molecules sample from the in-domain distribution
 - out-of-domain molecules find their nearest in-domain FG vector (Hamming distance) and
-  sample from a normal whose mean is shifted down from avg_error_in + 3 * std_error_in
-  by their FG similarity
+  sample from a normal whose mean is shifted down from the out-of-domain mean by their
+  FG similarity
 """
 from __future__ import annotations
 
@@ -24,6 +29,28 @@ DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / 'csv_outputs'
 
 # Columns of fg_presence.csv that are not FG flags.
 METADATA_COLUMNS = {'cid', 'Molecule', 'molecule', 'smiles', 'SMILES', 'pattern', 'pattern_index'}
+
+OUT_OF_DOMAIN_SHIFT_STDS = 3.0
+
+
+def load_model_specs(model_specs_path: str | Path, default_std: float) -> pd.DataFrame:
+    specs = pd.read_csv(model_specs_path)
+    if not {'model_name', 'avg_error_in'}.issubset(specs.columns):
+        raise ValueError('model_specs.csv must include model_name and avg_error_in columns')
+    if specs['model_name'].duplicated().any():
+        raise ValueError('model_specs.csv has duplicate model_name rows')
+    specs = specs.copy()
+    specs['model_name'] = specs['model_name'].astype(str).str.strip()
+    if 'std_error_in' not in specs.columns:
+        specs['std_error_in'] = default_std
+    specs['std_error_in'] = specs['std_error_in'].fillna(default_std)
+    if 'std_error_out' not in specs.columns:
+        specs['std_error_out'] = specs['std_error_in']
+    specs['std_error_out'] = specs['std_error_out'].fillna(specs['std_error_in'])
+    if specs['avg_error_in'].isna().any() or (specs[['std_error_in', 'std_error_out']] <= 0).any().any():
+        raise ValueError('model_specs.csv needs an avg_error_in for every model and positive std values')
+    specs['avg_error_out'] = specs['avg_error_in'] + OUT_OF_DOMAIN_SHIFT_STDS * specs['std_error_in']
+    return specs
 
 
 def load_patterns(fg_presence_path: str | Path, chunksize: int):
@@ -144,10 +171,8 @@ def build_pattern_samples(
     n_fgs = bits.sum(axis=1)
     frames = []
     for spec in specs.itertuples(index=False):
-        avg_in = float(spec.avg_error_in)
-        std_in = max(float(spec.std_error_in), 1e-6)
-        avg_out = avg_in + 3.0 * std_in
-        std_out = max(std_in * 1.5, 1e-6)
+        avg_in, std_in = spec.avg_error_in, spec.std_error_in
+        avg_out, std_out = spec.avg_error_out, spec.std_error_out
 
         in_mask = np.isin(pattern_ids, np.fromiter(domains[spec.model_name], dtype=np.int64))
         distance, nearest = nearest_in_domain(bits, in_mask)
@@ -184,15 +209,11 @@ def build_model_error_table(
     output_path: str | Path = DEFAULT_OUTPUT_DIR / 'molecule_model_error_table.csv',
     pattern_output_path: str | Path | None = DEFAULT_OUTPUT_DIR / 'pattern_model_error_table.csv',
     seed: int = 0,
+    default_std: float = 0.05,
     chunksize: int = 50_000,
 ) -> pd.DataFrame:
     """Write one sampled error per (molecule, model) and return the per-pattern table."""
-    specs = pd.read_csv(model_specs_path)
-    specs['model_name'] = specs['model_name'].astype(str).str.strip()
-    if 'avg_error_in' not in specs.columns:
-        specs['avg_error_in'] = 0.0
-    if 'std_error_in' not in specs.columns:
-        specs['std_error_in'] = 0.05
+    specs = load_model_specs(model_specs_path, default_std)
     model_names = specs['model_name'].tolist()
     pattern_clusters = pd.read_csv(pattern_clusters_path) if Path(pattern_clusters_path).exists() else pd.DataFrame()
     domains = load_domains(pattern_model_map_path, pattern_clusters, model_names)
@@ -257,6 +278,7 @@ def main():
     parser.add_argument('--output', type=str, default=str(DEFAULT_OUTPUT_DIR / 'molecule_model_error_table.csv'))
     parser.add_argument('--pattern-output', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_model_error_table.csv'))
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--std', type=float, default=0.05, help='std used when model_specs.csv has no std_error_in')
     parser.add_argument('--chunksize', type=int, default=50_000)
     args = parser.parse_args()
 
@@ -268,6 +290,7 @@ def main():
         output_path=args.output,
         pattern_output_path=args.pattern_output,
         seed=args.seed,
+        default_std=args.std,
         chunksize=args.chunksize,
     )
     print(f'Wrote molecule-model errors to {args.output}')
