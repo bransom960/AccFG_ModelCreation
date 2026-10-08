@@ -23,6 +23,7 @@ This is the location that the scripts are written to read from by default.
 - `label_clusters.py` — decodes cluster patterns into functional-group labels
 - `assign_clusters_to_models.py` — assigns cluster coverage to model buckets
 - `error_distributions.py` — samples one ground-truth error per molecule per model
+- `plot_error_distributions.py` — plots every sampled error per model, coloured by FG cluster
 - `patterns.py` — shared utilities for pattern generation/counting
 - `bernoulli_mixture_clustering.py` — actual overlapping Bernoulli-mixture clustering logic
 - `csv_outputs/` — all generated CSV outputs live here
@@ -240,6 +241,21 @@ Outputs:
 - `csv_outputs/molecule_model_error_table.csv` — one row per (molecule, model): `cid`, `pattern_index`, `model_name`, `domain_flag`, `nearest_distance`, `nearest_reference_cluster`, `distance_rank`, `error_mean`, `error_std`, `sampled_error`
 - `csv_outputs/pattern_model_error_table.csv` — one row per (pattern, model) with its distance, rank and position in the distribution
 
+### Plotting the errors
+
+`plot_error_distributions.py` reads `molecule_model_error_table.csv` and writes to `csv_outputs/figures/`:
+
+- `error_points.png` — one panel per model, all on the same axes: x = molecules grouped by FG cluster then pattern (the same order in every panel), y = sampled error, one dot per molecule
+- `error_points_<model>.png` — each panel on its own, on the same axes
+- `error_histograms.png` — one histogram per model, same bins and axes, stacked by cluster
+- `error_plot_summary.csv` — n, mean, std, min, max of the error per model, cluster and domain
+
+A molecule's colour is its pattern's primary cluster (`pattern_clusters.csv`); the `--top-groups` largest clusters (default 7, the most colours that stay distinguishable) get their own colour and the rest are grey "Other". The legend names each cluster's common FGs from `cluster_summary.csv`. Dashed and dotted lines mark the in-domain and out-of-domain means. `--max-points N` plots N molecules per model (the same ones in every panel) when every point is too slow; the histograms and the summary always use all of them.
+
+```bash
+python3 "molecule-fg-data/plot_error_distributions.py"
+```
+
 ## The model rule file
 
 The model rules live in:
@@ -273,6 +289,7 @@ python3 "molecule-fg-data/build_pattern_clusters.py" --max-components 12 --seed 
 python3 "molecule-fg-data/label_clusters.py"
 python3 "molecule-fg-data/assign_clusters_to_models.py"
 python3 "molecule-fg-data/error_distributions.py"
+python3 "molecule-fg-data/plot_error_distributions.py"
 ```
 
 That produces the full pipeline result.
