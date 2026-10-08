@@ -263,14 +263,16 @@ def build_model_error_table(
     default_std: float = 0.05,
     fg_weight: float = 0.8,
     jitter: float = 0.2,
+    min_error: float | None = 0.0,
     chunksize: int = 50_000,
 ) -> pd.DataFrame:
-    """Write one sampled error per (molecule, model) and return the per-pattern table.
+    """Write one sampled error per (molecule, model) and return a per-model summary.
 
     fg_weight: share of a pattern's position that comes from its FGs (1.0 = identical
         FG overlap gives identical position). The rest is per-pattern noise.
     jitter: share (in std units) of each molecule's error that is its own noise, so
         molecules with the same FGs land in the same range but not on the same value.
+    min_error: errors below this are clipped (None = no clipping).
     """
     if not 0.0 <= fg_weight <= 1.0 or not 0.0 <= jitter < 1.0:
         raise ValueError('fg_weight must be in [0, 1] and jitter in [0, 1)')
@@ -304,6 +306,8 @@ def build_model_error_table(
         model_name: group.set_index('pattern_index').loc[pattern_ids]
         for model_name, group in patterns.groupby('model_name', sort=False)
     }
+    stats = {(m, d): [0, 0.0, 0.0] for m in model_names for d in ('in', 'out')}
+    clipped = dict.fromkeys(model_names, 0)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,6 +325,15 @@ def build_model_error_table(
             domain = p['domain_flag'].to_numpy()[positions]
             std = p['error_std'].to_numpy()[positions]
             error = p['pattern_error'].to_numpy()[positions] + std * jitter * rng.standard_normal(len(chunk))
+            if min_error is not None:
+                clipped[model_name] += int((error < min_error).sum())
+                error = np.maximum(error, min_error)
+            for d in ('in', 'out'):
+                e = error[domain == d]
+                s = stats[(model_name, d)]
+                s[0] += e.size
+                s[1] += float(e.sum())
+                s[2] += float((e ** 2).sum())
             pd.DataFrame({
                 'cid': chunk['cid'].to_numpy(),
                 'pattern_index': chunk['pattern_index'].to_numpy(),
@@ -333,7 +346,24 @@ def build_model_error_table(
                 'error_std': std,
                 'sampled_error': error,
             }, columns=columns).to_csv(output_path, mode='a', header=False, index=False)
-    return patterns
+
+    summary_rows = []
+    for spec in specs.itertuples(index=False):
+        for d, target_mean, target_std in (
+            ('in', spec.avg_error_in, spec.std_error_in),
+            ('out', spec.avg_error_out, spec.std_error_out),
+        ):
+            n, total, total_sq = stats[(spec.model_name, d)]
+            mean = total / n if n else np.nan
+            std = np.sqrt(max(total_sq / n - mean ** 2, 0.0)) if n else np.nan
+            summary_rows.append({
+                'model_name': spec.model_name, 'domain_flag': d, 'n_molecules': n,
+                'target_mean': target_mean, 'sampled_mean': mean,
+                'target_std': target_std, 'sampled_std': std,
+            })
+        if clipped[spec.model_name]:
+            print(f'{spec.model_name}: clipped {clipped[spec.model_name]} errors below {min_error}')
+    return pd.DataFrame(summary_rows)
 
 
 def main():
@@ -348,10 +378,12 @@ def main():
     parser.add_argument('--std', type=float, default=0.05, help='std used when model_specs.csv has no std_error_in')
     parser.add_argument('--fg-weight', type=float, default=0.8, help='share of the error position driven by FGs (0-1)')
     parser.add_argument('--jitter', type=float, default=0.2, help='per-molecule noise, in std units (0-1)')
+    parser.add_argument('--min-error', type=float, default=0.0, help='clip errors below this value')
+    parser.add_argument('--no-clip', action='store_true', help='allow negative errors')
     parser.add_argument('--chunksize', type=int, default=50_000)
     args = parser.parse_args()
 
-    build_model_error_table(
+    summary = build_model_error_table(
         fg_presence_path=args.fg_presence,
         model_specs_path=args.model_specs,
         pattern_clusters_path=args.pattern_clusters,
@@ -362,10 +394,12 @@ def main():
         default_std=args.std,
         fg_weight=args.fg_weight,
         jitter=args.jitter,
+        min_error=None if args.no_clip else args.min_error,
         chunksize=args.chunksize,
     )
     print(f'Wrote molecule-model errors to {args.output}')
     print(f'Wrote pattern-model errors to {args.pattern_output}')
+    print(summary.to_string(index=False))
 
 
 if __name__ == '__main__':
