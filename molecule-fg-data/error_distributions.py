@@ -1,3 +1,14 @@
+"""Build the molecule-by-model ground-truth error table.
+
+Works per unique FG pattern: fg_presence.csv is streamed twice, once to collect the unique
+FG vectors and once to write one error per (molecule, model), so the input never has to
+fit in memory and nearest-neighbour distances are computed once per pattern.
+
+- in-domain molecules sample from N(avg_error_in, std_error_in)
+- out-of-domain molecules find their nearest in-domain FG vector (Hamming distance) and
+  sample from a normal whose mean is shifted down from avg_error_in + 3 * std_error_in
+  by their FG similarity
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,50 +22,158 @@ DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = DEFAULT_ROOT / 'molecule-fg-data'
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR / 'csv_outputs'
 
-
-def _parse_member_cids(value):
-    if pd.isna(value):
-        return []
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return []
-        return [item.strip() for item in value.split(',') if item.strip()]
-    return [str(value)]
+# Columns of fg_presence.csv that are not FG flags.
+METADATA_COLUMNS = {'cid', 'Molecule', 'molecule', 'smiles', 'SMILES', 'pattern', 'pattern_index'}
 
 
-def _hamming_distance_bits(a: str, b: str) -> int:
-    if len(a) != len(b):
-        length = max(len(a), len(b))
-        a = a.ljust(length, '0')
-        b = b.ljust(length, '0')
-    return int(np.count_nonzero(np.fromiter((x != y for x, y in zip(a, b)), dtype=int)))
+def load_patterns(fg_presence_path: str | Path, chunksize: int):
+    """Read the unique FG vectors and their molecule counts from fg_presence.csv.
+
+    Streams the file so it never has to fit in memory. A pattern is identified by
+    pattern_index; FG values > 0 count as present.
+    """
+    header = pd.read_csv(fg_presence_path, nrows=0).columns
+    if not {'cid', 'pattern_index'}.issubset(header):
+        raise ValueError('fg_presence.csv must include cid and pattern_index columns')
+    fg_columns = [col for col in header if col not in METADATA_COLUMNS]
+    if not fg_columns:
+        raise ValueError('fg_presence.csv has no FG columns')
+
+    bits_by_index: dict[int, np.ndarray] = {}
+    counts_by_index: dict[int, int] = {}
+    reader = pd.read_csv(
+        fg_presence_path,
+        usecols=['pattern_index'] + fg_columns,
+        dtype={col: np.float32 for col in fg_columns},
+        chunksize=chunksize,
+    )
+    for chunk in reader:
+        indices, counts = np.unique(chunk['pattern_index'].to_numpy(dtype=np.int64), return_counts=True)
+        for pattern_index, count in zip(indices.tolist(), counts.tolist()):
+            counts_by_index[pattern_index] = counts_by_index.get(pattern_index, 0) + count
+
+        first_rows = chunk.drop_duplicates('pattern_index')
+        first_bits = (first_rows[fg_columns].to_numpy() > 0).astype(np.uint8)
+        for pattern_index, bits in zip(first_rows['pattern_index'].astype(np.int64).tolist(), first_bits):
+            known = bits_by_index.get(pattern_index)
+            if known is None:
+                bits_by_index[pattern_index] = bits
+            elif not np.array_equal(known, bits):
+                raise ValueError(f'pattern_index {pattern_index} appears with two different FG vectors')
+
+    pattern_ids = np.array(sorted(bits_by_index), dtype=np.int64)
+    bits = np.stack([bits_by_index[i] for i in pattern_ids.tolist()])
+    counts = np.array([counts_by_index[i] for i in pattern_ids.tolist()], dtype=np.int64)
+    return pattern_ids, bits, counts, fg_columns
 
 
-def _pattern_to_model_lookup(pattern_clusters: pd.DataFrame, pattern_model_map: pd.DataFrame, fg_presence: pd.DataFrame | None = None):
-    assigned_patterns = {}
-    if not pattern_model_map.empty:
-        for model_name, group in pattern_model_map.groupby('model_name'):
-            assigned_patterns[model_name] = set(group['pattern_index'].astype(int).tolist())
+def load_domains(pattern_model_map_path: str | Path, pattern_clusters: pd.DataFrame, model_names: list[str]):
+    """Return {model_name: set of in-domain pattern_index}."""
+    pattern_model_map = pd.read_csv(pattern_model_map_path)
+    if 'model_name' not in pattern_model_map.columns:
+        raise ValueError('pattern_cluster_model_map.csv must include a model_name column')
+    pattern_model_map['model_name'] = pattern_model_map['model_name'].astype(str).str.strip()
 
-    fg_pattern_by_index = {}
-    if fg_presence is not None and not fg_presence.empty:
-        for _, row in fg_presence.iterrows():
-            fg_pattern_by_index[int(row['pattern_index'])] = str(row.get('pattern', ''))
+    if 'pattern_index' not in pattern_model_map.columns:
+        # Cluster-level map: expand every cluster to all of its member patterns.
+        if 'cluster_id' not in pattern_model_map.columns or not {'cluster_id', 'pattern_index'}.issubset(pattern_clusters.columns):
+            raise ValueError('pattern_cluster_model_map.csv needs pattern_index, or cluster_id plus pattern_clusters.csv')
+        pattern_model_map = pattern_model_map.merge(pattern_clusters[['cluster_id', 'pattern_index']], on='cluster_id')
 
-    pattern_lookup = {}
-    if not pattern_clusters.empty:
-        for _, row in pattern_clusters.iterrows():
-            pattern_index = int(row['pattern_index'])
-            cluster_id = int(row['cluster_id'])
-            pattern_bits = str(row.get('pattern', fg_pattern_by_index.get(pattern_index, '')))
-            pattern_lookup[pattern_index] = {
-                'cluster_id': cluster_id,
-                'pattern': pattern_bits,
-                'cluster_representative': row.get('cluster_representative', ''),
-            }
+    domains = {
+        model_name: set(group['pattern_index'].astype(np.int64).tolist())
+        for model_name, group in pattern_model_map.groupby('model_name')
+    }
+    unknown = sorted(set(domains) - set(model_names))
+    if unknown:
+        print(f'WARNING: models in the pattern-model map but not in model_specs.csv (ignored): {unknown}')
+    for model_name in model_names:
+        if not domains.get(model_name):
+            print(f'WARNING: model {model_name!r} has no in-domain patterns; every molecule is out-of-domain for it')
+    return {model_name: domains.get(model_name, set()) for model_name in model_names}
 
-    return assigned_patterns, pattern_lookup
+
+def nearest_in_domain(bits: np.ndarray, in_mask: np.ndarray, block_out: int = 1024, block_in: int = 16384):
+    """Minimum Hamming distance from every out-of-domain pattern to the in-domain patterns.
+
+    Uses d(a, b) = |a| + |b| - 2 a.b on float32 blocks (exact for 0/1 vectors this size).
+    Returns (distance, nearest pattern position) arrays over all patterns; in-domain
+    patterns get distance 0 and themselves, and every pattern gets inf / -1 when the
+    model has no in-domain patterns.
+    """
+    n_patterns = len(bits)
+    distance = np.full(n_patterns, np.inf)
+    nearest = np.full(n_patterns, -1, dtype=np.int64)
+    ref_idx = np.flatnonzero(in_mask)
+    distance[ref_idx] = 0.0
+    nearest[ref_idx] = ref_idx
+    out_idx = np.flatnonzero(~in_mask)
+    if ref_idx.size == 0 or out_idx.size == 0:
+        return distance, nearest
+
+    ref = bits[ref_idx].astype(np.float32)
+    ref_norm = ref.sum(axis=1)
+    for start in range(0, out_idx.size, block_out):
+        rows = out_idx[start:start + block_out]
+        x = bits[rows].astype(np.float32)
+        x_norm = x.sum(axis=1)
+        best = np.full(rows.size, np.inf)
+        best_pos = np.full(rows.size, -1, dtype=np.int64)
+        for ref_start in range(0, ref_idx.size, block_in):
+            ref_block = ref[ref_start:ref_start + block_in]
+            d = x_norm[:, None] + ref_norm[None, ref_start:ref_start + block_in] - 2.0 * (x @ ref_block.T)
+            j = d.argmin(axis=1)
+            dj = d[np.arange(rows.size), j]
+            better = dj < best
+            best[better] = dj[better]
+            best_pos[better] = ref_idx[ref_start + j[better]]
+        distance[rows] = np.rint(best)
+        nearest[rows] = best_pos
+    return distance, nearest
+
+
+def build_pattern_samples(
+    specs: pd.DataFrame,
+    domains: dict[str, set],
+    pattern_ids: np.ndarray,
+    bits: np.ndarray,
+    counts: np.ndarray,
+    cluster_of_pattern: dict[int, int],
+) -> pd.DataFrame:
+    """The normal each (pattern, model) pair samples its molecules' errors from."""
+    n_fgs = bits.sum(axis=1)
+    frames = []
+    for spec in specs.itertuples(index=False):
+        avg_in = float(spec.avg_error_in)
+        std_in = max(float(spec.std_error_in), 1e-6)
+        avg_out = avg_in + 3.0 * std_in
+        std_out = max(std_in * 1.5, 1e-6)
+
+        in_mask = np.isin(pattern_ids, np.fromiter(domains[spec.model_name], dtype=np.int64))
+        distance, nearest = nearest_in_domain(bits, in_mask)
+
+        similarity = np.clip(1.0 - distance / bits.shape[1], 0.0, 1.0)
+        # Same as the per-row version: no in-domain reference, or similarity 0, counts as 1.0.
+        similarity[~np.isfinite(distance) | (similarity == 0.0)] = 1.0
+        nearest_pattern = np.where(nearest >= 0, pattern_ids[np.maximum(nearest, 0)], -1)
+
+        frame = pd.DataFrame({
+            'pattern_index': pattern_ids,
+            'model_name': spec.model_name,
+            'domain_flag': np.where(in_mask, 'in', 'out'),
+            'n_molecules': counts,
+            'n_fgs': n_fgs,
+            'nearest_distance': np.where(in_mask, np.nan, distance),
+            'nearest_reference_pattern': np.where(in_mask, -1, nearest_pattern),
+            'fg_similarity_rank': np.where(in_mask, np.nan, similarity),
+            'error_mean': np.where(in_mask, avg_in, avg_out),
+            'error_std': np.where(in_mask, std_in, std_out),
+            'sample_mean': np.where(in_mask, avg_in, avg_out - similarity * 2.0 * std_out),
+            'sample_std': np.where(in_mask, std_in, std_out * 0.75),
+        })
+        frame['nearest_reference_cluster'] = frame['nearest_reference_pattern'].map(cluster_of_pattern)
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True)
 
 
 def build_model_error_table(
@@ -62,123 +181,71 @@ def build_model_error_table(
     model_specs_path: str | Path = DEFAULT_OUTPUT_DIR / 'model_specs.csv',
     pattern_clusters_path: str | Path = DEFAULT_OUTPUT_DIR / 'pattern_clusters.csv',
     pattern_model_map_path: str | Path = DEFAULT_OUTPUT_DIR / 'pattern_cluster_model_map.csv',
-    output_path: str | Path | None = None,
+    output_path: str | Path = DEFAULT_OUTPUT_DIR / 'molecule_model_error_table.csv',
+    pattern_output_path: str | Path | None = DEFAULT_OUTPUT_DIR / 'pattern_model_error_table.csv',
     seed: int = 0,
+    chunksize: int = 50_000,
 ) -> pd.DataFrame:
-    """Create a molecule-by-model ground-truth error table.
-
-    Rules:
-    - in-domain molecules use the model's in-domain normal distribution
-    - out-of-domain molecules compute the nearest in-domain reference and use a rank-based
-      shift of the out-of-domain normal distribution
-    - nearest_reference_cluster and fg_similarity_rank are only populated for out-of-domain rows
-    """
-    rng = np.random.default_rng(seed)
-
-    fg_presence = pd.read_csv(fg_presence_path)
-    model_specs = pd.read_csv(model_specs_path)
+    """Write one sampled error per (molecule, model) and return the per-pattern table."""
+    specs = pd.read_csv(model_specs_path)
+    specs['model_name'] = specs['model_name'].astype(str).str.strip()
+    if 'avg_error_in' not in specs.columns:
+        specs['avg_error_in'] = 0.0
+    if 'std_error_in' not in specs.columns:
+        specs['std_error_in'] = 0.05
+    model_names = specs['model_name'].tolist()
     pattern_clusters = pd.read_csv(pattern_clusters_path) if Path(pattern_clusters_path).exists() else pd.DataFrame()
-    pattern_model_map = pd.read_csv(pattern_model_map_path) if Path(pattern_model_map_path).exists() else pd.DataFrame()
+    domains = load_domains(pattern_model_map_path, pattern_clusters, model_names)
 
-    if not {'cid', 'pattern_index'}.issubset(fg_presence.columns):
-        raise ValueError('fg_presence.csv must include cid and pattern_index columns')
+    cluster_of_pattern = {}
+    if {'pattern_index', 'cluster_id'}.issubset(pattern_clusters.columns):
+        first = pattern_clusters.drop_duplicates('pattern_index')
+        cluster_of_pattern = dict(zip(first['pattern_index'].astype(np.int64), first['cluster_id'].astype(np.int64)))
 
-    feature_columns = [
-        col for col in fg_presence.columns
-        if col not in {'cid', 'Molecule', 'pattern_index'}
+    pattern_ids, bits, counts, fg_columns = load_patterns(fg_presence_path, chunksize)
+    print(f'{counts.sum()} molecules, {len(pattern_ids)} unique FG patterns, {len(fg_columns)} FGs')
+
+    molecule_rngs = [np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(len(specs))]
+
+    patterns = build_pattern_samples(specs, domains, pattern_ids, bits, counts, cluster_of_pattern)
+    if pattern_output_path is not None:
+        Path(pattern_output_path).parent.mkdir(parents=True, exist_ok=True)
+        patterns.to_csv(pattern_output_path, index=False)
+
+    # Per model: arrays aligned with pattern_ids, for fast lookup while streaming molecules.
+    per_model = {
+        model_name: group.set_index('pattern_index').loc[pattern_ids]
+        for model_name, group in patterns.groupby('model_name', sort=False)
+    }
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        'cid', 'pattern_index', 'model_name', 'domain_flag', 'nearest_distance',
+        'nearest_reference_cluster', 'fg_similarity_rank', 'error_mean', 'error_std', 'sampled_error',
     ]
+    pd.DataFrame(columns=columns).to_csv(output_path, index=False)
 
-    if 'avg_error_in' not in model_specs.columns:
-        model_specs['avg_error_in'] = 0.0
-    if 'std_error_in' not in model_specs.columns:
-        model_specs['std_error_in'] = 0.05
-
-    pattern_model_map = pattern_model_map.copy()
-    if 'pattern_index' in pattern_model_map.columns and 'cluster_id' in pattern_model_map.columns:
-        pattern_model_map['pattern_index'] = pattern_model_map['pattern_index'].astype(int)
-        pattern_model_map['cluster_id'] = pattern_model_map['cluster_id'].astype(int)
-
-    assigned_patterns, pattern_lookup = _pattern_to_model_lookup(pattern_clusters, pattern_model_map, fg_presence)
-    model_rows = []
-
-    for _, model_spec in model_specs.iterrows():
-        model_name = str(model_spec['model_name'])
-        avg_in = float(model_spec.get('avg_error_in', 0.0))
-        std_in = float(model_spec.get('std_error_in', 0.05))
-        std_in = max(std_in, 1e-6)
-        avg_out = avg_in + 3.0 * std_in
-        std_out = max(std_in * 1.5, 1e-6)
-
-        in_domain_patterns = set(assigned_patterns.get(model_name, set()))
-
-        for _, molecule in fg_presence.iterrows():
-            cid = str(molecule['cid'])
-            pattern_index = int(molecule['pattern_index'])
-            pattern_bits = str(molecule.get('pattern', ''))
-            if not pattern_bits and feature_columns:
-                pattern_bits = ''.join(str(int(v)) for v in [molecule[col] for col in feature_columns])
-
-            in_domain = pattern_index in in_domain_patterns
-            if in_domain:
-                sampled_error = float(rng.normal(avg_in, std_in))
-                model_rows.append({
-                    'cid': cid,
-                    'pattern_index': pattern_index,
-                    'model_name': model_name,
-                    'domain_flag': 'in',
-                    'nearest_reference_cluster': None,
-                    'fg_similarity_rank': None,
-                    'error_mean': avg_in,
-                    'error_std': std_in,
-                    'sampled_error': sampled_error,
-                })
-                continue
-
-            reference_candidates = set(in_domain_patterns) if in_domain_patterns else set(pattern_lookup.keys())
-
-            nearest_cluster = None
-            nearest_distance = None
-            for candidate_index, info in pattern_lookup.items():
-                if candidate_index not in reference_candidates:
-                    continue
-                candidate_bits = str(info.get('pattern', ''))
-                if not candidate_bits:
-                    continue
-                distance = _hamming_distance_bits(pattern_bits, candidate_bits)
-                if nearest_distance is None or distance < nearest_distance:
-                    nearest_distance = distance
-                    nearest_cluster = int(info.get('cluster_id', -1))
-
-            if nearest_cluster is None or nearest_distance is None:
-                similarity_rank = 0.0
-                if nearest_cluster is None:
-                    nearest_cluster = int(next(iter(pattern_lookup.values()), {}).get('cluster_id', -1)) if pattern_lookup else None
-            else:
-                similarity_rank = max(0.0, min(1.0, 1.0 - (nearest_distance / max(len(pattern_bits), 1))))
-
-            if nearest_cluster is not None and similarity_rank == 0.0 and pattern_lookup:
-                similarity_rank = 1.0
-
-            shifted_mean = avg_out - (similarity_rank * 2.0 * std_out)
-            sampled_error = float(rng.normal(shifted_mean, std_out * 0.75))
-            model_rows.append({
-                'cid': cid,
-                'pattern_index': pattern_index,
+    reader = pd.read_csv(fg_presence_path, usecols=['cid', 'pattern_index'], dtype={'cid': str}, chunksize=chunksize)
+    for chunk in reader:
+        positions = np.searchsorted(pattern_ids, chunk['pattern_index'].to_numpy(dtype=np.int64))
+        for model_name, rng in zip(model_names, molecule_rngs):
+            p = per_model[model_name]
+            error = (p['sample_mean'].to_numpy()[positions]
+                     + p['sample_std'].to_numpy()[positions] * rng.standard_normal(len(chunk)))
+            pd.DataFrame({
+                'cid': chunk['cid'].to_numpy(),
+                'pattern_index': chunk['pattern_index'].to_numpy(),
                 'model_name': model_name,
-                'domain_flag': 'out',
-                'nearest_reference_cluster': nearest_cluster,
-                'fg_similarity_rank': float(similarity_rank),
-                'error_mean': avg_out,
-                'error_std': std_out,
-                'sampled_error': sampled_error,
-            })
-
-    table = pd.DataFrame(model_rows)
-    if output_path is not None:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        table.to_csv(output_path, index=False)
-    return table
+                'domain_flag': p['domain_flag'].to_numpy()[positions],
+                'nearest_distance': p['nearest_distance'].to_numpy()[positions],
+                'nearest_reference_cluster': p['nearest_reference_cluster'].to_numpy()[positions],
+                'fg_similarity_rank': p['fg_similarity_rank'].to_numpy()[positions],
+                'error_mean': p['error_mean'].to_numpy()[positions],
+                'error_std': p['error_std'].to_numpy()[positions],
+                'sampled_error': error,
+            }, columns=columns).to_csv(output_path, mode='a', header=False, index=False)
+    return patterns
 
 
 def main():
@@ -188,19 +255,23 @@ def main():
     parser.add_argument('--pattern-clusters', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_clusters.csv'))
     parser.add_argument('--pattern-model-map', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_cluster_model_map.csv'))
     parser.add_argument('--output', type=str, default=str(DEFAULT_OUTPUT_DIR / 'molecule_model_error_table.csv'))
+    parser.add_argument('--pattern-output', type=str, default=str(DEFAULT_OUTPUT_DIR / 'pattern_model_error_table.csv'))
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--chunksize', type=int, default=50_000)
     args = parser.parse_args()
 
-    table = build_model_error_table(
+    build_model_error_table(
         fg_presence_path=args.fg_presence,
         model_specs_path=args.model_specs,
         pattern_clusters_path=args.pattern_clusters,
         pattern_model_map_path=args.pattern_model_map,
         output_path=args.output,
+        pattern_output_path=args.pattern_output,
         seed=args.seed,
+        chunksize=args.chunksize,
     )
-    print(f'Wrote {len(table)} molecule-model error rows to {args.output}')
-    print(table.head(5).to_string(index=False))
+    print(f'Wrote molecule-model errors to {args.output}')
+    print(f'Wrote pattern-model errors to {args.pattern_output}')
 
 
 if __name__ == '__main__':
