@@ -6,6 +6,7 @@
 #   3   build_pattern_clusters.py         Bernoulli-mixture clusters
 #   4   label_clusters.py                 cluster FG labels
 #   5   assign_clusters_to_models.py      whole clusters -> models, coverage report
+#   6   molecule_lineage.py               per-cid table: SMILES, FGs, cluster(s), model(s)
 #
 # Submit with:   bsub < molecule-fg-data/pipeline.lsf
 # (the "<" is required: `bsub pipeline.lsf` runs the file as a plain command and ignores
@@ -125,6 +126,11 @@ if [ "$rc" -eq 3 ]; then
     echo
     echo "No value in MAX_COMPONENTS_TRY met the rules: see $OUT/assignment_warnings.txt."
     echo "csv_outputs holds the last try. Add larger values and resubmit; stage 1 resumes."
+fi
+
+if [ "$rc" -eq 0 ]; then
+    stage "lineage: one row per molecule, SMILES to model(s)"
+    python "$PIPELINE/molecule_lineage.py" --fg-dir "$FG_DIR" --parquet
 fi
 
 echo "finished $(date)  (exit status $rc)"

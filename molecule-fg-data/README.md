@@ -22,6 +22,7 @@ This is the location that the scripts are written to read from by default.
 - `build_pattern_clusters.py` — clusters binary FG patterns
 - `label_clusters.py` — decodes cluster patterns into functional-group labels
 - `assign_clusters_to_models.py` — assigns cluster coverage to model buckets
+- `molecule_lineage.py` — after stage 5: one row per molecule with its cid, SMILES, FGs, cluster(s) and model(s)
 - `error_distributions.py` — samples one ground-truth error per molecule per model
 - `plot_error_distributions.py` — plots every sampled error per model, coloured by FG cluster
 - `patterns.py` — shared utilities for pattern generation/counting
@@ -213,6 +214,23 @@ If no assignment can give every model its exclusive share, stage 5 writes `assig
 
 If any model ends more than `--tolerance` (default `0.02`, i.e. ±2 percentage points) from its target, the clusters are too coarse for the targets. All outputs are still written, but the script then prints a message naming each model that misses and the cluster sizes, saying to re-run `build_pattern_clusters.py` with a larger `--max-components`, saves it to `csv_outputs/assignment_warnings.txt`, and exits with status **3**. `within_tolerance` in the report shows which models pass.
 
+### One row per molecule: `molecule_lineage.py`
+
+Run after stage 5 to look up any molecule in one place. It joins stages 1–5 by `cid` into
+`csv_outputs/molecule_lineage.csv`, one row per input molecule:
+
+`cid`, `smiles`, `status` (`clustered` or the reason it was rejected), `pattern_index`, `n_fgs`,
+`fgs` (`;`-separated FG names), `primary_cluster`, `clusters` (every cluster it belongs to,
+primary first) and `models` (every model given any of those clusters). Rejected molecules keep
+their cid, SMILES and status, with the other columns empty.
+
+```bash
+python3 "molecule-fg-data/molecule_lineage.py" --fg-dir /data/fg --parquet   # fg_matrix.py output
+python3 "molecule-fg-data/molecule_lineage.py"                               # fg_presence.csv
+```
+
+`pipeline.lsf` runs it as its last step. `--parquet` also writes `molecule_lineage.parquet`.
+
 ## Stage 6: sample a ground-truth error per molecule per model
 
 Script:
@@ -337,6 +355,7 @@ This is the most important conceptual link:
 - `cluster_summary.csv` = chemical summary for each cluster
 - `model_assignments.csv` = which cluster covers which model
 - `model_coverage_report.csv` = model coverage summary and gaps
+- `molecule_lineage.csv` = per-molecule join of all of the above: cid → SMILES → FGs → cluster(s) → model(s)
 
 ## Notes for future use
 
