@@ -239,7 +239,9 @@ Script:
 
 What it does:
 
-- gives every model two normal error distributions: in-domain, centred on `avg_error_in` with std `std_error_in`, and out-of-domain, centred 3 std higher (`avg_error_in + 3 * std_error_in`)
+- gives every model two normal error distributions: in-domain, centred on `avg_error_in` with std `std_error_in`, and out-of-domain, centred on `avg_error_out` with std `std_error_out`. When `avg_error_out` is empty or the column is missing, it is 3 std above the in-domain mean (`avg_error_in + 3 * std_error_in`)
+- `avg_error_in` of `none` (or empty) means exact in-domain, i.e. 0, as for a lookup. Such a model must give `avg_error_out`: a lookup can't predict molecules outside its table, and the default would put its out-of-domain errors at about 0.15
+- prints each model's in-domain and out-of-domain mean and std before sampling
 - a molecule is in-domain for a model when its pattern is in one of the model's clusters (`pattern_cluster_model_map.csv`)
 - each FG cluster (a pattern's primary cluster) gets its own part of each model's distribution (`--cluster-weight`, default 0.6), molecules with similar FGs land close together (`--fg-weight`, default 0.3), and the rest is per-pattern noise, so molecules with the same FGs land in the same range but not on the same value
 - in-domain: patterns are ranked by that score
@@ -253,7 +255,13 @@ Inputs:
 - `csv_outputs/molecule_patterns.csv`
 - `csv_outputs/pattern_clusters.csv`
 - `csv_outputs/pattern_cluster_model_map.csv`
-- `csv_outputs/model_specs.csv` — needs `avg_error_in`; `std_error_in` is optional (`--std`, default 0.05)
+- `csv_outputs/model_specs.csv` — needs `avg_error_in` (a number or `none`); optional: `avg_error_out` (required for `none` models), `std_error_in` (`--std`, default 0.05), `std_error_out` (defaults to `std_error_in`). For example:
+
+  ```
+  model_name,target_coverage,avg_error_in,avg_error_out,compute_cost,time_penalty
+  Lookup,0.05,none,1.0,0.1,0.05
+  Small Statistical,0.35,1,,0.2,0.15
+  ```
 
 Outputs:
 
@@ -289,7 +297,8 @@ The file contains one row per model:
 - `model_name`
 - `target_coverage` — the fraction of clustered molecules the model should cover
 - `min_fgs` / `max_fgs` — optional, and ignored by the assignment
-- `avg_error_in` — the model's average in-domain error (stage 6)
+- `avg_error_in` — the model's average in-domain error, or `none` for exact in-domain (stage 6)
+- `avg_error_out` — optional average out-of-domain error (stage 6; required when `avg_error_in` is `none`)
 - `std_error_in` — optional std of both error distributions (stage 6; default 0.05)
 
 Important modeling note:
