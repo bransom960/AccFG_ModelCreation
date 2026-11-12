@@ -231,6 +231,20 @@ python3 "molecule-fg-data/molecule_lineage.py"                               # f
 
 `pipeline.lsf` runs it as its last step. `--parquet` also writes `molecule_lineage.parquet`.
 
+The `split` column (`train` / `test`, empty for rejected molecules) is a held-out set for evaluating the routing agent: train on the `train` molecules and report results on `test`. It holds out whole groups, never single molecules. Molecules with the same FG pattern have the same FGs, embeddings and error distributions, so splitting them would put copies of the same molecule on both sides.
+
+- `--holdout-fraction` (default `0.2`): share of the clustered molecules in `test`; `0` turns the split off
+- `--split-by pattern` (default): hold out whole FG patterns, i.e. unseen FG combinations from clusters the agent has seen
+- `--split-by cluster`: hold out whole primary clusters, a harder test with new kinds of molecules; large clusters can push `test` well above the fraction (a warning says so)
+- `--split-seed` (default `0`): which groups are held out. The same inputs and seed always give the same split
+
+`pipeline.lsf` sets these with `HOLDOUT_FRACTION`, `SPLIT_BY` and `SEED`. To make the files the routing agent reads:
+
+```bash
+python3 -c "import pandas as pd; d=pd.read_csv('csv_outputs/molecule_lineage.csv'); d=d[d.status=='clustered']
+for s in ('train','test'): d[d.split==s][['cid','pattern_index']].to_csv(f'molecule_patterns_{s}.csv', index=False)"
+```
+
 ## Stage 6: sample a ground-truth error per molecule per model
 
 Script:

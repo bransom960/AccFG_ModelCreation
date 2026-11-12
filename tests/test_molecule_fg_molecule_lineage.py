@@ -63,3 +63,25 @@ def test_one_row_per_molecule(tmp_path, monkeypatch):
     assert pd.isna(df.loc['104', 'clusters']) and pd.isna(df.loc['104', 'models'])
     assert df.loc['105', 'smiles'] == '[Na+].[Cl-]'
     assert pd.isna(df.loc['105', 'pattern_index'])
+
+
+def test_split_holds_out_whole_patterns(tmp_path, monkeypatch):
+    import numpy as np
+    n = 200
+    table = pd.DataFrame({
+        'status': ['clustered'] * n + ['rejected_no_fg'],
+        'pattern_index': pd.array(list(np.arange(n) // 4) + [999], dtype='Int64'),  # 50 patterns of 4
+        'primary_cluster': pd.array(list(np.arange(n) // 40) + [pd.NA], dtype='Int64'),
+    })
+    split = lineage.assign_split(table, 0.2, 'pattern', seed=0)
+
+    assert pd.isna(split.iloc[-1])                                    # not clustered: no split
+    assert split.iloc[:n].isin(['train', 'test']).all()
+    assert (table.iloc[:n].groupby('pattern_index').apply(lambda g: split[g.index].nunique()) == 1).all()
+    assert split.eq('test').sum() == 40                               # 20% of 200, whole patterns
+    assert split.equals(lineage.assign_split(table, 0.2, 'pattern', seed=0))      # reproducible
+    assert not split.equals(lineage.assign_split(table, 0.2, 'pattern', seed=1))  # seed matters
+
+    by_cluster = lineage.assign_split(table, 0.2, 'cluster', seed=0)
+    assert (table.iloc[:n].groupby('primary_cluster').apply(lambda g: by_cluster[g.index].nunique()) == 1).all()
+    assert lineage.assign_split(table, 0.0, 'pattern', seed=0).isna().all()
