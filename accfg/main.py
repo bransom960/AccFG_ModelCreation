@@ -4,14 +4,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import networkx as nx
 
+from .spreadsheet import fg_presence_dataframe as _fg_presence_dataframe
+from .spreadsheet import update_fg_presence_csv as _update_fg_presence_csv
+
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def canonical_smiles(smi):
     return Chem.MolToSmiles(Chem.MolFromSmiles(smi))
 
 class AccFG():
-    def __init__(self, common_fgs=True, heterocycle_fgs=True, user_defined_fgs={}, print_load_info=False, lite=False):
+    def __init__(self, common_fgs=True, heterocycle_fgs=True, user_defined_fgs={}, print_load_info=False, lite=False, exclude_fgs=None):
         self.lite = lite
+        self.exclude_fgs = self._normalize_exclude_fgs(exclude_fgs)
+        if 'rings' in self.exclude_fgs:
+            heterocycle_fgs = False
+            self.exclude_fgs.add('benzene')
         log_text = ""
         if common_fgs and not lite:
             self.dict_fgs_common_path = os.path.join(PROJECT_DIR, 'accfg/fgs_common.csv')
@@ -37,6 +44,9 @@ class AccFG():
             log_text += f"Loaded {len(user_defined_fgs)} user-defined functional groups. "
         else:
             self.dict_fgs_user_defined = {}
+        excluded_count = self._exclude_fgs(self.exclude_fgs)
+        if excluded_count:
+            log_text += f"Excluded {excluded_count} functional groups. "
         self.dict_fgs = {**self.dict_fgs_common, **self.dict_fg_heterocycle, **self.dict_fgs_user_defined}
         
         if print_load_info:
@@ -55,6 +65,27 @@ class AccFG():
             return freq
         else:
             return False
+
+    def _normalize_exclude_fgs(self, exclude_fgs):
+        if exclude_fgs is None:
+            return set()
+        if isinstance(exclude_fgs, str):
+            return {exclude_fgs}
+        return set(exclude_fgs)
+
+    def _exclude_fgs(self, exclude_fgs):
+        excluded = set()
+        for fg_name in exclude_fgs:
+            for fg_dict in (
+                self.dict_fgs_common,
+                self.dict_fg_heterocycle,
+                self.dict_fgs_user_defined,
+            ):
+                if fg_name in fg_dict:
+                    excluded.add(fg_name)
+                    fg_dict.pop(fg_name)
+        return len(excluded)
+
     def _get_bonds_from_match(self, query_mol, mol, atom_match):
         """
         Args:
@@ -84,6 +115,27 @@ class AccFG():
                 fg_smi_edit = fg_smi_edit.replace('[nH]','[n]')
             user_defined_fgs_edit[fg_name] = fg_smi_edit
         return user_defined_fgs_edit
+
+    def search_fg_name(self, fg_name):
+        return self.dict_fgs.get(fg_name, False)
+
+    def search_fg_smiles(self, fg_smiles):
+        for fg_name, fg_smi in self.dict_fgs.items():
+            if fg_smi == fg_smiles:
+                return fg_name
+
+        if ';' in fg_smiles:
+            return False
+
+        fg_mol = Chem.MolFromSmiles(fg_smiles)
+        if fg_mol is None:
+            return False
+
+        fg_smi = Chem.MolToSmiles(fg_mol).replace('[nH]', '[n]')
+        for fg_name, dict_fg_smi in self.dict_fgs.items():
+            if dict_fg_smi == fg_smi:
+                return fg_name
+        return False
     
     def run(self, smiles: str, show_atoms=True, show_graph=False, canonical=True) -> dict:
         """
@@ -178,6 +230,20 @@ class AccFG():
         except:
             return None
             # return "Wrong argument. Please input a valid molecular SMILES."
+
+    def fg_presence_vector(self, smiles: str, canonical: bool = True) -> dict:
+        """Compatibility wrapper for the spreadsheet helper."""
+        from .spreadsheet import fg_presence_vector
+        return fg_presence_vector(self, smiles, canonical=canonical)
+
+    def fg_presence_dataframe(self, smiles_list, canonical: bool = True, output_csv: str = None, append_to_csv: bool = False):
+        """Spreadsheet-style binary feature table, stored in a dedicated module."""
+        return _fg_presence_dataframe(self, smiles_list, canonical=canonical, output_csv=output_csv, append_to_csv=append_to_csv)
+
+    def update_fg_presence_csv(self, smiles_list, csv_path, canonical: bool = True):
+        """Append new molecules to a CSV without duplicating rows."""
+        return _update_fg_presence_csv(self, smiles_list, csv_path, canonical=canonical)
+
     def csv_to_dict(self, csv_file, lite=False):
         data = {}
         with open(csv_file, 'r') as file:
@@ -191,4 +257,3 @@ class AccFG():
                     key = key.replace('#','').lstrip()
                 data[key] = row.pop('SMARTS Pattern')
         return data
-    
