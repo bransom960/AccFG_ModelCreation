@@ -11,6 +11,8 @@ Joins what stages 1-5 wrote, by cid, into csv_outputs/molecule_lineage.csv:
   primary_cluster its most probable cluster (stage 3)
   clusters        every cluster it belongs to, primary first, ','-separated
   models          every model given any of those clusters (stage 5), ';'-separated
+  split           train or test, a held-out set for evaluating the routing agent (clustered
+                  molecules only; see --holdout-fraction and --split-by)
 
 Rejected molecules keep their cid, SMILES and status; the other columns are empty.
 
@@ -20,11 +22,26 @@ The SMILES come from stage 1's output, the same place stage 2 read the FGs from:
     python3 molecule-fg-data/molecule_lineage.py                        # csv_outputs/fg_presence.csv
 
 Add --parquet to also write molecule_lineage.parquet (smaller and faster to load).
+
+The train/test split holds out whole groups of molecules, never single molecules: molecules
+with the same FG pattern have the same FGs, embeddings and error distributions, so splitting
+them would put copies of the same molecule on both sides and the test score would only measure
+memorisation.
+
+  --split-by pattern  (default) hold out whole FG patterns: unseen FG combinations, from
+                      clusters the agent has seen
+  --split-by cluster  hold out whole primary clusters: a harder test, new kinds of molecules
+
+Groups are put in a fixed pseudo-random order (a hash of --split-seed and the group id, so the
+order of a group doesn't depend on which other groups exist) and taken for the test set until it
+holds --holdout-fraction (default 0.2) of the clustered molecules. The same inputs and seed
+always give the same split. --holdout-fraction 0 turns the split off.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import zlib
 from pathlib import Path
 
 import pandas as pd
@@ -44,7 +61,7 @@ MODEL_ASSIGNMENTS = OUTPUT_DIR / 'model_assignments.csv'
 LINEAGE = OUTPUT_DIR / 'molecule_lineage.csv'
 
 COLUMNS = ['cid', 'smiles', 'status', 'pattern_index', 'n_fgs', 'fgs',
-           'primary_cluster', 'clusters', 'models']
+           'primary_cluster', 'clusters', 'models', 'split']
 
 
 def read_smiles(fg_dir: Path | None) -> pd.DataFrame:
@@ -112,6 +129,29 @@ def per_pattern(fg_names: list[str]) -> pd.DataFrame:
     return out.merge(clusters.drop(columns='member_of'), on='pattern_index', how='left')
 
 
+def assign_split(table: pd.DataFrame, fraction: float, split_by: str, seed: int) -> pd.Series:
+    """'train' / 'test' for each clustered molecule, NA for the rest. Whole groups (patterns or
+    primary clusters) go to test, in a fixed hashed order, until `fraction` of the clustered
+    molecules are in it."""
+    key = {'pattern': 'pattern_index', 'cluster': 'primary_cluster'}[split_by]
+    split = pd.Series(pd.NA, index=table.index, dtype='string')
+    clustered = table['status'].eq('clustered') & table[key].notna()
+    if fraction <= 0 or not clustered.any():
+        return split
+    sizes = table.loc[clustered, key].astype(int).value_counts()
+    order = sorted(sizes.index, key=lambda g: (zlib.crc32(f'{seed}:{g}'.encode()), g))
+    target = fraction * sizes.sum()
+    test_groups, taken = set(), 0
+    for group in order:
+        if taken >= target:
+            break
+        test_groups.add(group)
+        taken += sizes[group]
+    groups = table.loc[clustered, key].astype(int)
+    split[clustered] = groups.isin(test_groups).map({True: 'test', False: 'train'})
+    return split
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -120,7 +160,14 @@ def main(argv=None) -> int:
     parser.add_argument('-o', '--output', type=Path, default=LINEAGE)
     parser.add_argument('--parquet', action='store_true',
                         help='also write the table as .parquet next to the CSV')
+    parser.add_argument('--holdout-fraction', type=float, default=0.2,
+                        help='share of clustered molecules in the test split (default 0.2; 0 = no split)')
+    parser.add_argument('--split-by', choices=['pattern', 'cluster'], default='pattern',
+                        help='hold out whole FG patterns (default) or whole primary clusters')
+    parser.add_argument('--split-seed', type=int, default=0, help='seed for which groups are held out')
     args = parser.parse_args(argv)
+    if not 0.0 <= args.holdout_fraction < 1.0:
+        raise SystemExit('--holdout-fraction must be at least 0 and below 1')
 
     needed = [MOLECULE_PATTERNS, MOLECULE_STATUS, PATTERN_COUNTS, FG_COLUMNS,
               PATTERN_CLUSTERS, MODEL_ASSIGNMENTS]
@@ -145,6 +192,7 @@ def main(argv=None) -> int:
     table.loc[not_clustered, ['primary_cluster', 'clusters', 'models']] = pd.NA
     for col in ('pattern_index', 'n_fgs', 'primary_cluster'):
         table[col] = table[col].astype('Int64')
+    table['split'] = assign_split(table, args.holdout_fraction, args.split_by, args.split_seed)
     table = table[COLUMNS]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +211,14 @@ def main(argv=None) -> int:
     for what, n in problems.items():
         if n:
             print(f'  WARNING: {n:,} molecules with {what}')
+    if args.holdout_fraction > 0:
+        key = {'pattern': 'pattern_index', 'cluster': 'primary_cluster'}[args.split_by]
+        for name in ('train', 'test'):
+            part = clustered[clustered['split'] == name]
+            print(f'  {name}: {len(part):,} molecules ({len(part) / max(len(clustered), 1):.1%}), '
+                  f'{part[key].nunique():,} {args.split_by}s')
+        if clustered['split'].eq('test').sum() > 2 * args.holdout_fraction * len(clustered):
+            print(f'  WARNING: the {args.split_by}s are large, so the test split is well above --holdout-fraction')
     return 0
 
 
