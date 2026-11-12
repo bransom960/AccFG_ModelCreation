@@ -44,11 +44,11 @@
 set -euo pipefail
 
 # ---- edit these ---------------------------------------------------------------------
-PIPELINE=$HOME/molecule-fg-data          # this folder, as uploaded to the cluster
-JSONL_DIR=/path/to/jsonl                 # the processed_Compound_*.jsonl files
+PIPELINE=/dccstor/amd/brandi/AccFG_ModelCreation/molecule-fg-data         # this folder, as uploaded to the cluster
+JSONL_DIR=/dccstor/amd/datasets/pubchem
+WORK=/dccstor/amd/brandi/scratch               # the processed_Compound_*.jsonl files
 GLOB='processed_Compound_*.jsonl'
 TARGET=500000                            # molecules to sample (salts excluded)
-WORK=/path/to/scratch/fg_run             # stage-1 outputs; scratch is better than $HOME
 MAX_COMPONENTS_TRY="12 16 24 32 48"      # cluster counts to try, smallest first
 PRUNE_THRESHOLD=0.001                    # drop clusters with mixing weight <= this
 TOLERANCE=0.02                           # allowed |coverage - target| per model
