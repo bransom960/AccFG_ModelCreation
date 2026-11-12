@@ -54,6 +54,8 @@ PRUNE_THRESHOLD=0.001                    # drop clusters with mixing weight <= t
 TOLERANCE=0.02                           # allowed |coverage - target| per model
 MIN_EXCLUSIVE=0.01                       # share of molecules each model must have alone
 SEED=0
+HOLDOUT_FRACTION=0.2                     # share of clustered molecules held out as the test split
+SPLIT_BY=pattern                         # hold out whole FG patterns, or whole clusters (cluster)
 # module load python/3.11                # or: source ~/miniforge3/bin/activate accfg
 # --------------------------------------------------------------------------------------
 
@@ -130,7 +132,8 @@ fi
 
 if [ "$rc" -eq 0 ]; then
     stage "lineage: one row per molecule, SMILES to model(s)"
-    python "$PIPELINE/molecule_lineage.py" --fg-dir "$FG_DIR" --parquet
+    python "$PIPELINE/molecule_lineage.py" --fg-dir "$FG_DIR" --parquet \
+           --holdout-fraction "$HOLDOUT_FRACTION" --split-by "$SPLIT_BY" --split-seed "$SEED"
 fi
 
 echo "finished $(date)  (exit status $rc)"

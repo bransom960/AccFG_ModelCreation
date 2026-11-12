@@ -1,0 +1,187 @@
+from pathlib import Path
+import json
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / 'molecule-fg-data'
+OUTPUT_DIR = DATA_DIR / 'csv_outputs'
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+DEFAULT_INPUT = OUTPUT_DIR / 'pattern_clusters.csv'
+CLUSTER_LABELED = OUTPUT_DIR / 'pattern_clusters_labeled.csv'
+CLUSTER_SUMMARY = OUTPUT_DIR / 'cluster_summary.csv'
+CLUSTER_CENTROIDS = OUTPUT_DIR / 'cluster_centroids.csv'
+FG_COLUMNS = OUTPUT_DIR / 'fg_columns.json'  # written by build_pattern_count_dictionary.py
+
+# Bit-string and list columns must stay text. Left to type inference, pandas may read a
+# 534-digit pattern as a number, which drops its leading zeros or, depending on the pandas
+# version, raises OverflowError.
+TEXT_COLUMNS = {
+    'pattern': str,
+    'cluster_representative': str,
+    'cluster_memberships': str,
+    'cluster_probabilities': str,
+    'member_cids': str,
+}
+
+
+def decode_pattern(pattern: str, fg_names: list[str]) -> list[str]:
+    """Return FG names where the bit is 1."""
+    return [fg_names[i] for i, bit in enumerate(pattern) if bit == '1']
+
+
+def weighted_common_fgs(member_patterns, member_counts, fg_names, threshold=0.5):
+    """FGs present in >= threshold weighted fraction of cluster members."""
+    if not member_patterns:
+        return []
+
+    total = sum(member_counts)
+    if total == 0:
+        return []
+
+    weighted_presence = [0.0] * len(fg_names)
+    for pat, cnt in zip(member_patterns, member_counts):
+        for i, bit in enumerate(pat):
+            if bit == '1':
+                weighted_presence[i] += cnt
+
+    return [
+        fg_names[i]
+        for i in range(len(fg_names))
+        if weighted_presence[i] / total >= threshold
+    ]
+
+
+def parse_cluster_memberships(value):
+    if pd.isna(value):
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        return [int(part.strip()) for part in value.split(',') if part.strip()]
+    return [int(value)]
+
+
+def cluster_pattern_weight(group: pd.DataFrame) -> int:
+    """Count each unique pattern once for a cluster.
+
+    Overlap-aware cluster outputs can repeat the same pattern across multiple
+    cluster memberships, so we must deduplicate by pattern before summing counts.
+    """
+    if group.empty:
+        return 0
+    if 'pattern_index' in group.columns:
+        return int(group.drop_duplicates(subset=['pattern_index'])['count'].sum())
+    return int(group['count'].sum())
+
+
+def load_centroids(path: Path) -> dict:
+    """cluster_id -> centroid bit string, as written by build_pattern_clusters.py."""
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype={'centroid': str})
+    return {int(cid): centroid for cid, centroid in zip(df['cluster_id'], df['centroid'])}
+
+
+def cluster_centroid(cid: int, group: pd.DataFrame, centroids: dict) -> str:
+    """Return cluster `cid`'s own centroid.
+
+    `cluster_representative` on each row is the centroid of that row's PRIMARY cluster, so
+    the first row of a cluster's group can belong to a pattern that only joined it as a
+    secondary member and carry another cluster's centroid. Use cluster_centroids.csv; for
+    outputs written before that file existed, fall back to a row whose primary cluster is
+    `cid`.
+    """
+    if int(cid) in centroids:
+        return centroids[int(cid)]
+    if 'cluster_primary' in group.columns:
+        own = group[group['cluster_primary'].astype(int) == int(cid)]
+        if not own.empty:
+            return own['cluster_representative'].iloc[0]
+    raise ValueError(f'No centroid for cluster {cid}: re-run build_pattern_clusters.py so it '
+                     f'writes {CLUSTER_CENTROIDS.name}.')
+
+
+def load_cluster_rows(cluster_input: Path) -> pd.DataFrame:
+    df = pd.read_csv(cluster_input, dtype=TEXT_COLUMNS)
+
+    if 'cluster_memberships' in df.columns:
+        expanded_rows = []
+        for _, row in df.iterrows():
+            cluster_ids = parse_cluster_memberships(row.get('cluster_memberships'))
+            if not cluster_ids:
+                if 'cluster_id' in df.columns and pd.notna(row.get('cluster_id')):
+                    cluster_ids = [int(row['cluster_id'])]
+            for cid in cluster_ids:
+                new_row = row.to_dict()
+                new_row['cluster_id'] = int(cid)
+                expanded_rows.append(new_row)
+        return pd.DataFrame(expanded_rows)
+
+    return df
+
+
+def main():
+    cluster_input = DEFAULT_INPUT
+    if not FG_COLUMNS.exists():
+        raise SystemExit(f'{FG_COLUMNS} not found: run build_pattern_count_dictionary.py first')
+    fg_names = json.loads(FG_COLUMNS.read_text())
+
+    df = load_cluster_rows(cluster_input)
+    centroids = load_centroids(CLUSTER_CENTROIDS)
+
+    rows = []
+    summary_rows = []
+    for cid, group in df.groupby('cluster_id'):
+        centroid = cluster_centroid(cid, group, centroids)
+        centroid_fgs = decode_pattern(centroid, fg_names)
+
+        member_patterns = group['pattern'].tolist()
+        member_counts = group['count'].tolist()
+        union_fgs = sorted({
+            fg
+            for pat in member_patterns
+            for fg in decode_pattern(pat, fg_names)
+        })
+        common_fgs = weighted_common_fgs(
+            member_patterns,
+            member_counts,
+            fg_names,
+            threshold=0.5,
+        )
+
+        group = group.copy()
+        group['cluster_representative_fgs'] = ','.join(centroid_fgs)
+        group['cluster_representative_n_fgs'] = len(centroid_fgs)
+        group['cluster_member_fgs_union'] = ','.join(union_fgs)
+        group['cluster_member_fgs_common'] = ','.join(common_fgs)
+        rows.append(group)
+
+        summary_rows.append({
+            'cluster_id': cid,
+            'cluster_weight': cluster_pattern_weight(group),
+            'n_patterns': len(group.drop_duplicates(subset=['pattern_index'])) if 'pattern_index' in group.columns else len(group),
+            'centroid_fgs': ','.join(centroid_fgs),
+            'centroid_n_fgs': len(centroid_fgs),
+            'union_fgs': ','.join(union_fgs),
+            'union_n_fgs': len(union_fgs),
+            'common_fgs': ','.join(common_fgs),
+            'common_n_fgs': len(common_fgs),
+        })
+
+    labeled = pd.concat(rows, ignore_index=True)
+    labeled.to_csv(CLUSTER_LABELED, index=False)
+
+    summary = pd.DataFrame(summary_rows).sort_values('cluster_id').reset_index(drop=True)
+    summary.to_csv(CLUSTER_SUMMARY, index=False)
+
+    print(f'Wrote {len(labeled)} labeled rows to {CLUSTER_LABELED}')
+    print(f'Wrote {len(summary)} cluster summaries to {CLUSTER_SUMMARY}')
+    print()
+    print(summary.to_string(index=False))
+
+
+if __name__ == '__main__':
+    main()
